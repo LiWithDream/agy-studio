@@ -364,3 +364,70 @@ test('git-bridge: preserves mixed-case shortPath/repoName, authorizes live linke
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });
+
+test('error step extraction: remote-tap-helpers reads val.error.* and disk-fallback decodes protobuf 24.3.2 message', async () => {
+  const helpers = await import(pathToFileURL(path.join(REPO, 'user/src/modules/remote-tap-helpers.mjs')).href);
+  const diskMod = await import(pathToFileURL(path.join(REPO, 'core/daemon/remote/disk-fallback.mjs')).href);
+  const { DatabaseSync } = await import('node:sqlite');
+
+  // 1. Live tap helper extraction from val.error.*
+  const rec = helpers.extractStepRecord(
+    {
+      type: 'CORTEX_STEP_TYPE_ERROR_MESSAGE',
+      status: 'CORTEX_STEP_STATUS_DONE',
+      step: {
+        case: 'errorMessage',
+        value: {
+          error: {
+            shortError: 'API error (attempt 1): stream reading error: unexpected EOF',
+            userErrorMessage: 'API error (attempt 2): stream reading error: unexpected EOF',
+          },
+        },
+      },
+    },
+    66
+  );
+  assert.equal(rec.type, 'ERROR_MESSAGE');
+  assert.match(rec.text, /API error \(attempt 2\): stream reading error: unexpected EOF/);
+  assert.ok(rec.error?.userErrorMessage);
+
+  // 2. Disk fallback protobuf decode of step_type=17 -> field 24.3.2
+  const encodeVarint = (n) => {
+    const bytes = [];
+    let v = n >>> 0;
+    while (v >= 0x80) {
+      bytes.push((v & 0x7f) | 0x80);
+      v >>>= 7;
+    }
+    bytes.push(v);
+    return Buffer.from(bytes);
+  };
+  const encodeLen = (fieldNum, payload) => {
+    const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload), 'utf8');
+    return Buffer.concat([encodeVarint((fieldNum << 3) | 2), encodeVarint(buf.length), buf]);
+  };
+  const msg24 = encodeLen(3, encodeLen(2, 'API error (attempt 1): Post "https://example.invalid": unexpected EOF'));
+  const stepPayload = encodeLen(24, msg24);
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'maga-errpb-'));
+  try {
+    const convDir = path.join(tmpRoot, 'conversations');
+    fs.mkdirSync(convDir, { recursive: true });
+    const cid = 'dddddddd-1111-4111-8111-111111111111';
+    const db = new DatabaseSync(path.join(convDir, `${cid}.db`));
+    db.exec(
+      'CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, error_details BLOB, metadata BLOB, step_payload BLOB);'
+    );
+    db.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?, ?)').run(66, 17, 3, Buffer.alloc(0), Buffer.alloc(0), stepPayload);
+    db.close();
+
+    const snap = diskMod.readConversationSnapshotFromDisk(cid, { antigravityDir: tmpRoot });
+    assert.equal(snap?.source, 'disk');
+    assert.equal(snap.steps.length, 1);
+    assert.equal(snap.steps[0].type, 'ERROR_MESSAGE');
+    assert.match(snap.steps[0].text, /unexpected EOF/);
+    assert.match(snap.steps[0].error?.message || '', /unexpected EOF/);
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});

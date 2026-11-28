@@ -28,30 +28,48 @@ function statusBadgeTone(status) {
   return 'warn';
 }
 
-export function renderUnifiedDiffDom(diffText) {
-  const wrap = el('div', { className: 'rc-diff-code' });
+export function renderUnifiedDiffDom(diffText, { wrap = false } = {}) {
+  const wrapEl = el('div', { className: 'rc-diff-code', 'data-wrap': wrap ? 'true' : 'false' });
   const text = String(diffText || '');
   if (!text.trim()) {
-    wrap.appendChild(el('div', { className: 'rc-empty', text: '无文本差异（可能是空变更或二进制文件）。' }));
-    return wrap;
+    wrapEl.appendChild(el('div', { className: 'rc-empty', text: '无文本差异（可能是空变更或二进制文件）。' }));
+    return wrapEl;
   }
   const lines = text.split('\n');
+  let oldLn = 0;
+  let newLn = 0;
   for (let idx = 0; idx < lines.length; idx++) {
     const line = lines[idx];
     let kind = 'ctx';
-    if (line.startsWith('@@')) kind = 'hunk';
-    else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git') || line.startsWith('index ')) kind = 'meta';
-    else if (line.startsWith('+')) kind = 'add';
-    else if (line.startsWith('-')) kind = 'del';
-    wrap.appendChild(
+    let lnText = '';
+    const hunkMatch = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
+    if (hunkMatch) {
+      kind = 'hunk';
+      oldLn = Number(hunkMatch[1]);
+      newLn = Number(hunkMatch[2]);
+      lnText = '··';
+    } else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git') || line.startsWith('index ')) {
+      kind = 'meta';
+    } else if (line.startsWith('+')) {
+      kind = 'add';
+      lnText = newLn > 0 ? String(newLn++) : '';
+    } else if (line.startsWith('-')) {
+      kind = 'del';
+      lnText = oldLn > 0 ? String(oldLn++) : '';
+    } else {
+      if (oldLn > 0) oldLn++;
+      if (newLn > 0) lnText = String(newLn++);
+    }
+    wrapEl.appendChild(
       el(
         'div',
         { className: `rc-diff-line is-${kind}` },
+        el('span', { className: 'rc-diff-ln', text: lnText }),
         el('span', { className: 'rc-diff-text', text: line || ' ' })
       )
     );
   }
-  return wrap;
+  return wrapEl;
 }
 
 function renderArtifactsTab(viewer, { canWrite, online, onSelectArtifact, onRefreshArtifacts, onQuickReply }) {
@@ -158,7 +176,7 @@ function renderArtifactsTab(viewer, { canWrite, online, onSelectArtifact, onRefr
 
 function renderGitTab(
   viewer,
-  { projects = [], onRefreshGit, onSelectProjectGit, onSelectDirtyFile, onSelectCommit, onSelectCommitFile, onBackToGitList }
+  { projects = [], onRefreshGit, onSelectProjectGit, onSelectDirtyFile, onSelectCommit, onSelectCommitFile, onBackToGitList, onToggleDiffWrap }
 ) {
   const body = el('div', { className: 'rc-viewer-body' });
   if (viewer.gitLoading) {
@@ -271,7 +289,7 @@ function renderGitTab(
       el(
         'div',
         { className: 'rc-viewer-repo-head' },
-        el('strong', { text: status.repoName || 'Git 仓库' }),
+        switcherSelect ? null : el('strong', { text: status.repoName || 'Git 仓库' }),
         status.shortPath ? el('span', { className: 'rc-mono rc-ov-muted', text: status.shortPath }) : null
       ),
       el(
@@ -306,7 +324,16 @@ function renderGitTab(
           text: viewer.diffTarget.commitHash
             ? `${viewer.diffTarget.commitHash.slice(0, 7)} · ${viewer.diffTarget.filePath}`
             : viewer.diffTarget.filePath,
-        })
+        }),
+        onToggleDiffWrap
+          ? el('button', {
+              type: 'button',
+              className: 'rc-btn is-sm rc-diff-wrap-btn',
+              'aria-pressed': viewer.diffWrap ? 'true' : 'false',
+              text: '自动换行',
+              onClick: () => onToggleDiffWrap(),
+            })
+          : null
       )
     );
     if (viewer.diffLoading) {
@@ -322,7 +349,7 @@ function renderGitTab(
         el('div', { className: 'rc-viewer-warn', text: 'Diff 超过 64 KB 上限，已截断显示。' })
       );
     }
-    body.appendChild(renderUnifiedDiffDom(viewer.diffResult?.diff || ''));
+    body.appendChild(renderUnifiedDiffDom(viewer.diffResult?.diff || '', { wrap: Boolean(viewer.diffWrap) }));
     return body;
   }
 
@@ -459,6 +486,7 @@ export function renderViewerDrawer(
     onSelectCommit = null,
     onSelectCommitFile = null,
     onBackToGitList = null,
+    onToggleDiffWrap = null,
   } = {}
 ) {
   if (!container) return;
@@ -517,6 +545,7 @@ export function renderViewerDrawer(
           onSelectCommit,
           onSelectCommitFile,
           onBackToGitList,
+          onToggleDiffWrap,
         })
       : renderArtifactsTab(viewer, {
           canWrite,
@@ -562,6 +591,7 @@ export function createInitialViewerState() {
     diffResult: null,
     diffLoading: false,
     diffError: '',
+    diffWrap: false,
   };
 }
 
@@ -662,6 +692,10 @@ export function createViewerController({
           state.viewer.commitFiles = [];
           state.viewer.commitFilesError = '';
         }
+        render();
+      },
+      onToggleDiffWrap: () => {
+        state.viewer.diffWrap = !state.viewer.diffWrap;
         render();
       },
     });

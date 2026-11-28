@@ -158,14 +158,8 @@ export function el(tag, props = {}, ...children) {
       node.className = String(val);
     } else if (key === 'text') {
       node.textContent = String(val);
-    } else if (key === 'onClick' && typeof val === 'function') {
-      node.addEventListener('click', val);
-    } else if (key === 'onInput' && typeof val === 'function') {
-      node.addEventListener('input', val);
-    } else if (key === 'onChange' && typeof val === 'function') {
-      node.addEventListener('change', val);
-    } else if (key === 'onSubmit' && typeof val === 'function') {
-      node.addEventListener('submit', val);
+    } else if (/^on[A-Z]/.test(key) && typeof val === 'function') {
+      node.addEventListener(key.slice(2).toLowerCase(), val);
     } else if (key === 'disabled') {
       node.disabled = Boolean(val);
     } else if (key === 'checked') {
@@ -193,6 +187,9 @@ export function el(tag, props = {}, ...children) {
           if (prop && v) node.style.setProperty(prop, v);
         }
       }
+    } else if (/^on/i.test(key)) {
+      // Never emit inline on* HTML attributes under strict script-src 'self' CSP
+      continue;
     } else {
       node.setAttribute(key, String(val));
     }

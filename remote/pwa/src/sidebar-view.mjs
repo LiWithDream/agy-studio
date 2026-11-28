@@ -13,16 +13,20 @@ import {
   normalizeRunStatus,
 } from './ui-helpers.mjs';
 
-function resolveConversationProjectName(state, c) {
+function resolveConversationProjectInfo(state, c) {
   const wtMeta = state.studioOverview?.worktreeByCid?.[c.id] || null;
-  if (wtMeta?.repoName) return wtMeta.repoName;
   const projects = Array.isArray(state.studioOverview?.projects) ? state.studioOverview.projects : [];
   const pid = String(c.projectId || wtMeta?.projectId || '');
-  if (pid) {
-    const match = projects.find((p) => p.id === pid);
-    if (match?.name) return match.name;
+  const matchedById = pid ? projects.find((p) => p && p.id === pid) || null : null;
+  if (matchedById) {
+    return { key: matchedById.id, projectId: matchedById.id, name: matchedById.name || wtMeta?.repoName || 'Project', project: matchedById };
   }
-  return '独立会话';
+  if (wtMeta?.repoName) {
+    const byName = projects.filter((p) => p && p.name === wtMeta.repoName);
+    const uniqueProj = byName.length === 1 ? byName[0] : null;
+    return { key: uniqueProj?.id || `name:${wtMeta.repoName}`, projectId: uniqueProj?.id || '', name: wtMeta.repoName, project: uniqueProj };
+  }
+  return { key: 'standalone', projectId: '', name: '独立会话', project: null };
 }
 
 function buildConversationRow(state, c, onSelectConversation) {
@@ -54,9 +58,9 @@ function buildConversationRow(state, c, onSelectConversation) {
     el(
       'div',
       { className: 'rc-convo-meta' },
-      c.parentConversationId ? el('span', { className: 'rc-pill', text: 'Subagent' }) : null,
-      wtMeta?.branch ? el('span', { className: 'rc-pill', 'data-tone': 'info', text: `⎇ ${wtMeta.branch}` }) : null,
-      el('span', { text: `${c.stepCount ?? 0} steps` }),
+      c.parentConversationId ? el('span', { className: 'rc-pill', text: '子代理' }) : null,
+      wtMeta?.branch ? el('span', { className: 'rc-pill rc-convo-branch', 'data-tone': 'info', text: `⎇ ${wtMeta.branch}` }) : null,
+      el('span', { text: `${c.stepCount ?? 0} 步` }),
       c.lastModifiedTime
         ? el('span', { className: 'rc-convo-meta-time', text: `· ${formatRelativeTime(c.lastModifiedTime)}` })
         : null
@@ -70,9 +74,11 @@ export function renderFilterChipsView({
   onSelectFilter,
   onSelectGroupBy,
   onToggleSubagents,
+  onSelectProject = null,
 }) {
   clearNode(refs.filterRow);
   clearNode(refs.groupRow);
+  if (refs.projFilterRow) clearNode(refs.projFilterRow);
 
   const pendingCount = collectPendingApprovals(state).length;
   const runningCount = state.conversations.filter(
@@ -129,6 +135,58 @@ export function renderFilterChipsView({
       onClick: () => onToggleSubagents?.(),
     })
   );
+
+  if (refs.projFilterRow) {
+    const projects = Array.isArray(state.studioOverview?.projects) ? state.studioOverview.projects : [];
+    if (projects.length === 0) {
+      refs.projFilterRow.classList.add('rc-hidden');
+    } else {
+      refs.projFilterRow.classList.remove('rc-hidden');
+      const countByProj = new Map();
+      for (const c of state.conversations) {
+        if (!state.includeSubagents && c.parentConversationId) continue;
+        const info = resolveConversationProjectInfo(state, c);
+        if (info.projectId) {
+          countByProj.set(info.projectId, (countByProj.get(info.projectId) || 0) + 1);
+        }
+      }
+      const projSelect = el(
+        'select',
+        {
+          className: 'rc-select rc-sidebar-proj-select',
+          'aria-label': '按项目筛选对话',
+          value: state.selectedProjectId || '',
+          onChange: (ev) => onSelectProject?.(String(ev?.target?.value || '')),
+        },
+        el('option', {
+          value: '',
+          text: '项目：全部项目',
+          ...(!state.selectedProjectId ? { selected: 'selected' } : {}),
+        }),
+        ...projects.map((p) => {
+          const n = countByProj.get(p.id) || 0;
+          const active = state.selectedProjectId === p.id;
+          return el('option', {
+            value: p.id,
+            text: `${p.name || 'Project'} (${n})`,
+            ...(active ? { selected: 'selected' } : {}),
+          });
+        })
+      );
+      refs.projFilterRow.appendChild(projSelect);
+      if (state.selectedProjectId) {
+        refs.projFilterRow.appendChild(
+          el('button', {
+            type: 'button',
+            className: 'rc-chip is-compact rc-proj-reset-chip',
+            title: '清除项目筛选',
+            text: '全部',
+            onClick: () => onSelectProject?.(''),
+          })
+        );
+      }
+    }
+  }
 }
 
 export function renderSidebarListView({
@@ -136,6 +194,11 @@ export function renderSidebarListView({
   refs,
   resolvedLayoutMode,
   onSelectConversation,
+  onToggleCollapseProject = null,
+  onExpandProjectGroup = null,
+  onSelectProject = null,
+  onOpenProjectGit = null,
+  onOpenNewChatInProject = null,
 }) {
   clearNode(refs.sidebarList);
 
@@ -194,17 +257,117 @@ export function renderSidebarListView({
   if (state.sidebarGroupBy === 'project') {
     const groups = new Map();
     for (const c of list) {
-      const label = resolveConversationProjectName(state, c);
-      if (!groups.has(label)) groups.set(label, []);
-      groups.get(label).push(c);
-    }
-    for (const [projLabel, items] of groups.entries()) {
-      refs.sidebarList.appendChild(
-        el('div', { className: 'rc-sec-label', text: `${projLabel} (${items.length})` })
-      );
-      for (const c of items) {
-        refs.sidebarList.appendChild(buildConversationRow(state, c, onSelectConversation));
+      const info = resolveConversationProjectInfo(state, c);
+      if (!groups.has(info.key)) {
+        groups.set(info.key, { ...info, items: [], hasRunning: false });
       }
+      const g = groups.get(info.key);
+      g.items.push(c);
+      if (isRunningStatus(c.status)) g.hasRunning = true;
+    }
+
+    const forceShowAll = Boolean(String(state.searchQuery || '').trim() || state.selectedProjectId);
+    const DEFAULT_GROUP_LIMIT = 5;
+
+    for (const grp of groups.values()) {
+      const isCollapsed = !forceShowAll && Boolean(state.collapsedProjects?.has?.(grp.key));
+      const isExpanded = forceShowAll || Boolean(state.expandedProjectGroups?.has?.(grp.key));
+      const visibleItems = isCollapsed
+        ? []
+        : isExpanded || grp.items.length <= DEFAULT_GROUP_LIMIT
+          ? grp.items
+          : grp.items.slice(0, DEFAULT_GROUP_LIMIT);
+
+      const actionChildren = [];
+      if (grp.projectId && onSelectProject) {
+        const filtered = state.selectedProjectId === grp.projectId;
+        actionChildren.push(
+          el('button', {
+            type: 'button',
+            className: 'rc-proj-act-btn',
+            title: filtered ? '取消仅看此项目' : '仅看此项目对话',
+            text: filtered ? '全部' : '仅看',
+            onClick: (ev) => {
+              ev?.stopPropagation?.();
+              onSelectProject(filtered ? '' : grp.projectId);
+            },
+          })
+        );
+      }
+      if (grp.project?.isGitRepo && onOpenProjectGit) {
+        actionChildren.push(
+          el('button', {
+            type: 'button',
+            className: 'rc-proj-act-btn',
+            title: '查看该项目 Git 状态与 Diff',
+            text: 'Git',
+            onClick: (ev) => {
+              ev?.stopPropagation?.();
+              onOpenProjectGit({ projectId: grp.projectId });
+            },
+          })
+        );
+      }
+      if (grp.projectId && onOpenNewChatInProject) {
+        actionChildren.push(
+          el('button', {
+            type: 'button',
+            className: 'rc-proj-act-btn',
+            title: `在 ${grp.name} 下新建会话`,
+            text: '+',
+            onClick: (ev) => {
+              ev?.stopPropagation?.();
+              onOpenNewChatInProject(grp.projectId);
+            },
+          })
+        );
+      }
+
+      const sectionEl = el(
+        'div',
+        { className: 'rc-proj-group', 'data-collapsed': isCollapsed ? 'true' : 'false' },
+        el(
+          'div',
+          {
+            className: 'rc-proj-group-head',
+            role: 'button',
+            tabindex: '0',
+            'aria-expanded': isCollapsed ? 'false' : 'true',
+            onClick: () => onToggleCollapseProject?.(grp.key),
+            onKeydown: (ev) => {
+              if (ev.key === 'Enter' || ev.key === ' ') {
+                ev.preventDefault();
+                onToggleCollapseProject?.(grp.key);
+              }
+            },
+          },
+          el('span', { className: 'rc-proj-chevron', text: isCollapsed ? '▸' : '▾' }),
+          el('span', { className: 'rc-proj-group-name', text: grp.name }),
+          el('span', { className: 'rc-proj-group-count', text: String(grp.items.length) }),
+          grp.hasRunning ? el('span', { className: 'rc-proj-run-dot', title: '包含运行中会话' }) : null,
+          actionChildren.length > 0 ? el('div', { className: 'rc-proj-group-actions' }, ...actionChildren) : null
+        )
+      );
+
+      if (!isCollapsed) {
+        const itemsWrap = el('div', { className: 'rc-proj-group-items' });
+        for (const c of visibleItems) {
+          itemsWrap.appendChild(buildConversationRow(state, c, onSelectConversation));
+        }
+        if (grp.items.length > visibleItems.length) {
+          const restCount = grp.items.length - visibleItems.length;
+          itemsWrap.appendChild(
+            el('button', {
+              type: 'button',
+              className: 'rc-proj-more-btn',
+              text: `展开其余 ${restCount} 条会话`,
+              onClick: () => onExpandProjectGroup?.(grp.key),
+            })
+          );
+        }
+        sectionEl.appendChild(itemsWrap);
+      }
+      refs.sidebarList.appendChild(sectionEl);
     }
     return;
   }

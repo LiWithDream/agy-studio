@@ -3412,22 +3412,47 @@ test('Remote Desktop Workbench UI: CSS bundle/invariants, pane clamp, theme swit
     overviewMod.renderOverviewPanel(ovHost, {
       usageRange: '7d',
       onChangeUsageRange: () => {},
+      selectedConvo: { id: 'c-ov-1', title: 'Steps Sync', status: 'RUNNING', stepCount: 657 },
+      snapshot: { cascadeId: 'c-ov-1', status: 'RUNNING', steps: Array.from({ length: 200 }, (_, i) => ({ idx: i })) },
       overview: {
         todayUsage: { totalTokens: 1000, requests: 2, cacheRead: 700, uncached: 200, output: 100 },
         usageDays: [
+          { date: '2026-11-26', totalTokens: 0, requests: 0, cacheRead: 0, uncached: 0, output: 0 },
           { date: '2026-11-27', totalTokens: 400, requests: 1, cacheRead: 250, uncached: 100, output: 50 },
           { date: '2026-11-28', totalTokens: 1000, requests: 2, cacheRead: 700, uncached: 200, output: 100 },
         ],
-        projects: [{ id: 'p-1', name: 'MAGA', shortPath: '~/Developer/MAGA', isGitRepo: true, worktrees: [] }],
+        projects: [
+          { id: 'p-1', name: 'MAGA', shortPath: '~/Developer/MAGA', isGitRepo: true, worktrees: [{ branch: 'main', isMain: true }] },
+        ],
         worktreeByCid: {},
       },
     });
     assert.equal(ovHost.querySelectorAll('.rc-ov-legend-dot').length, 3);
     assert.equal(ovHost.querySelectorAll('.rc-usage-col-track .rc-usage-col-bar').length, 2);
+    assert.equal(ovHost.querySelectorAll('.rc-usage-col-zero').length, 1);
+    assert.ok(ovHost.querySelector('.rc-usage-grid .rc-usage-max-tick'));
+    assert.ok(ovHost.textContent.includes('657 步'), 'Overview active session must reflect real total stepCount');
+    assert.equal(ovHost.textContent.includes('main (main)'), false, 'main branch must deduplicate main (main)');
+    const dayCols = ovHost.querySelectorAll('.rc-usage-col');
+    dayCols[1].dispatchEvent(new dom.window.Event('focus'));
+    assert.match(ovHost.querySelector('.rc-ov-kpi')?.textContent || '', /^400 tok$/);
+    ovHost.querySelector('.rc-usage-chart').dispatchEvent(new dom.window.Event('pointerleave'));
+    assert.match(ovHost.querySelector('.rc-ov-kpi')?.textContent || '', /^1\.4k tok$/);
 
     // 5. Composer bar omits duplicate desktop 回到底部 button
     const composerSrc = fs.readFileSync(path.join(PWA_DIR, 'src', 'composer-bar.mjs'), 'utf8');
     assert.equal(composerSrc.includes('回到底部'), false);
+
+    // 5b. UI helper el() binds onKeydown cleanly without inline on* attributes
+    let kCount = 0;
+    const keyNode = uiHelpersMod.el('div', {
+      onKeydown: () => { kCount += 1; },
+      onclick: 'alert(1)',
+    });
+    assert.equal(keyNode.getAttribute('onkeydown'), null);
+    assert.equal(keyNode.getAttribute('onclick'), null);
+    keyNode.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter' }));
+    assert.equal(kCount, 1);
 
     // 6. Viewer drawer: unique repoName fallback, ambiguous repoName safety, cleaned worktree projectId, explicit repo switch, & gitError safety
     const viewerMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'viewer-drawer.mjs')).href);
@@ -3486,12 +3511,16 @@ test('Remote Desktop Workbench UI: CSS bundle/invariants, pane clamp, theme swit
     assert.equal(drawerHost.textContent.includes('stale.txt'), false, 'gitError must not render stale gitStatus');
 
     const switcherHost = doc.createElement('div');
+    let diffWrapToggles = 0;
     viewerMod.renderViewerDrawer(switcherHost, {
       viewer: {
         ...viewerMod.createInitialViewerState(),
         open: true,
         tab: 'git',
         projectId: 'proj-unique',
+        diffTarget: { filePath: 'a.mjs', commitHash: '' },
+        diffWrap: true,
+        diffResult: { diff: '@@ -10,2 +10,3 @@\n-const a = 1;\n+const a = 2;\n+const b = 3;' },
         gitStatus: { branch: 'main', dirtyCount: 0, dirtyFiles: [], recentCommits: [], repoName: 'UniqueRepo', shortPath: '~/UniqueRepo' },
       },
       projects: [
@@ -3499,10 +3528,16 @@ test('Remote Desktop Workbench UI: CSS bundle/invariants, pane clamp, theme swit
         { id: 'proj-dup-1', name: 'SharedName', shortPath: '~/SharedName' },
       ],
       onSelectProjectGit: () => {},
+      onToggleDiffWrap: () => { diffWrapToggles += 1; },
     });
     assert.equal(switcherHost.querySelectorAll('select.rc-viewer-proj-select option').length, 2);
+    assert.equal(switcherHost.querySelector('.rc-viewer-repo-head > strong'), null, 'dedup repo strong when switcher select is visible');
+    assert.ok(switcherHost.querySelectorAll('.rc-diff-ln').length >= 4);
+    assert.equal(switcherHost.querySelector('.rc-diff-code')?.getAttribute('data-wrap'), 'true');
+    switcherHost.querySelector('.rc-diff-wrap-btn')?.click();
+    assert.equal(diffWrapToggles, 1);
 
-    // 7. Timeline view: consecutive errors collapse, compact empty error tag, and empty !cid shortcut card
+    // 7. Timeline view: invisible failed step error bridging, concise single-line error group, live running row, Chinese labels & empty !cid shortcut card
     const timelineMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'timeline-view.mjs')).href);
     const tlHost = doc.createElement('div');
     const tlTitle = doc.createElement('h2');
@@ -3519,16 +3554,20 @@ test('Remote Desktop Workbench UI: CSS bundle/invariants, pane clamp, theme swit
       state: {
         selectedId: groupedCid,
         identity: { role: 'observe' },
-        conversations: [{ id: groupedCid, title: 'Error Group Test', status: 'IDLE' }],
+        conversations: [{ id: groupedCid, title: 'Error Group Test', status: 'RUNNING' }],
         snapshots: new Map([
           [
             groupedCid,
             {
+              status: 'RUNNING',
               steps: [
-                { idx: 1, type: 'ERROR_MESSAGE', status: 'ERROR', text: 'err one' },
-                { idx: 2, type: 'ERROR_MESSAGE', status: 'ERROR', text: 'err two' },
-                { idx: 3, type: 'USER_INPUT', status: 'DONE', text: 'retry' },
-                { idx: 4, type: 'ERROR_MESSAGE', status: 'ERROR', text: '' },
+                { idx: 1, type: 'ERROR_MESSAGE', status: 'DONE', text: 'API error (attempt 1): Post "https://example.com": EOF' },
+                { idx: 2, type: 'PLANNER_RESPONSE', status: 'ERROR', text: '', toolCalls: [] },
+                { idx: 3, type: 'ERROR_MESSAGE', status: 'DONE', text: 'API error (attempt 2): stream reading error: unexpected EOF' },
+                { idx: 4, type: 'GENERIC', status: 'DONE', toolCalls: [{ name: 'mcpTool', args: '{}' }] },
+                { idx: 5, type: 'GENERIC', status: 'DONE', toolCalls: [{ name: 'exit_plan_mode', args: '{}' }] },
+                { idx: 6, type: 'USER_INPUT', status: 'DONE', text: 'retry' },
+                { idx: 7, type: 'ERROR_MESSAGE', status: 'ERROR', text: '' },
               ],
             },
           ],
@@ -3537,8 +3576,63 @@ test('Remote Desktop Workbench UI: CSS bundle/invariants, pane clamp, theme swit
       },
       refs: { timeline: tlHost, detailTitle: tlTitle, detailSub: tlSub },
     });
-    assert.equal(tlHost.querySelectorAll('details.rc-error-group').length, 1);
-    assert.ok(tlHost.querySelector('.rc-step[data-role="error"][data-empty="true"]'));
+    const errGroups = tlHost.querySelectorAll('details.rc-error-group');
+    assert.equal(errGroups.length, 2);
+    assert.match(errGroups[0].querySelector('.rc-error-group-sum')?.textContent || '', /×2.*unexpected EOF/);
+    const emptyErrSum = errGroups[1].querySelector('.rc-error-group-sum')?.textContent || '';
+    assert.equal(emptyErrSum.includes('错误 #7'), false);
+    assert.match(emptyErrSum, /详情不可用（#7）/);
+    assert.equal(emptyErrSum.includes('瞬时'), false);
+    assert.ok(tlHost.querySelector('.rc-live-status-row'));
+    const actText = tlHost.querySelector('.rc-activity-summary')?.textContent || '';
+    assert.match(actText, /外部工具/);
+    assert.match(actText, /规划/);
+
+    // 8. Sidebar view: top project dropdown + sticky collapsible project groups + 5-item cap + 步 unit
+    const sidebarMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'sidebar-view.mjs')).href);
+    const sbRefs = {
+      filterRow: doc.createElement('div'),
+      groupRow: doc.createElement('div'),
+      projFilterRow: doc.createElement('div'),
+      sidebarList: doc.createElement('div'),
+      navApprovalsBadge: doc.createElement('span'),
+    };
+    const manyConvos = Array.from({ length: 7 }, (_, i) => ({
+      id: `bbbbbbbb-bbbb-4bbb-8bbb-00000000000${i}`,
+      title: `Chat ${i}`,
+      status: i === 0 ? 'RUNNING' : 'IDLE',
+      stepCount: 10 + i,
+      projectId: 'p-1',
+    }));
+    const sbState = {
+      filter: 'all',
+      sidebarGroupBy: 'project',
+      includeSubagents: false,
+      searchQuery: '',
+      selectedProjectId: '',
+      selectedId: manyConvos[0].id,
+      conversations: manyConvos,
+      collapsedProjects: new Set(),
+      expandedProjectGroups: new Set(),
+      studioOverview: {
+        projects: [{ id: 'p-1', name: 'MAGA', isGitRepo: true }],
+        worktreeByCid: {},
+      },
+    };
+    let toggledProjKey = '';
+    sidebarMod.renderFilterChipsView({ state: sbState, refs: sbRefs });
+    assert.equal(sbRefs.projFilterRow.querySelectorAll('select.rc-sidebar-proj-select option').length, 2);
+    sidebarMod.renderSidebarListView({
+      state: sbState,
+      refs: sbRefs,
+      resolvedLayoutMode: 'desktop',
+      onToggleCollapseProject: (k) => { toggledProjKey = k; },
+    });
+    assert.equal(sbRefs.sidebarList.querySelectorAll('.rc-convo-item').length, 5);
+    assert.match(sbRefs.sidebarList.querySelector('.rc-proj-more-btn')?.textContent || '', /展开其余 2 条会话/);
+    assert.match(sbRefs.sidebarList.textContent, /10 步/);
+    sbRefs.sidebarList.querySelector('.rc-proj-group-head')?.click();
+    assert.equal(toggledProjKey, 'p-1');
   } finally {
     if (prevDoc) Object.defineProperty(globalThis, 'document', prevDoc);
     else delete globalThis.document;

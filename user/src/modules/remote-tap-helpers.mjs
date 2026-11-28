@@ -349,7 +349,17 @@ export function extractStepRecord(s, idx) {
       }
     }
   } else if (stepCase === 'errorMessage' || type === 'ERROR_MESSAGE') {
-    text = String(val.userMessage || val.message || s?.errorDetails?.message || '');
+    const errObj = val.error && typeof val.error === 'object' ? val.error : null;
+    text = String(
+      errObj?.userErrorMessage ||
+        errObj?.shortError ||
+        errObj?.fullError ||
+        errObj?.message ||
+        val.userMessage ||
+        val.message ||
+        s?.errorDetails?.message ||
+        ''
+    );
   } else if (stepCase === 'systemMessage' || type === 'SYSTEM_MESSAGE') {
     text = String(val.message || '');
   } else {
@@ -395,7 +405,17 @@ export function extractStepRecord(s, idx) {
     }
   }
 
-  const error = s?.errorDetails ? toJsonSafe(s.errorDetails) : null;
+  const fallbackErrObj =
+    (stepCase === 'errorMessage' || type === 'ERROR_MESSAGE') && val.error && typeof val.error === 'object'
+      ? val.error
+      : null;
+  const error = s?.errorDetails
+    ? toJsonSafe(s.errorDetails)
+    : fallbackErrObj
+      ? toJsonSafe(fallbackErrObj)
+      : text && (stepCase === 'errorMessage' || type === 'ERROR_MESSAGE')
+        ? { message: truncateStr(text, 2048) }
+        : null;
   return {
     idx,
     type,

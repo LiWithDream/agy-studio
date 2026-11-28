@@ -145,6 +145,7 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
   const searchRow = el('div', { className: 'rc-search-row' }, searchInput, newChatBtn);
   const filterRow = el('div', { className: 'rc-filter-row' });
   const groupRow = el('div', { className: 'rc-group-row' });
+  const projFilterRow = el('div', { className: 'rc-proj-filter-row rc-hidden' });
   const sidebarList = el('div', { className: 'rc-scroll-list' });
   const sidebarProjects = el('div', { className: 'rc-sidebar-projects rc-hidden' });
   sidebarProjects.addEventListener(
@@ -266,7 +267,7 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
   const sidebar = el(
     'aside',
     { className: 'rc-sidebar' },
-    el('div', { className: 'rc-sidebar-head' }, searchRow, filterRow, groupRow),
+    el('div', { className: 'rc-sidebar-head' }, searchRow, filterRow, groupRow, projFilterRow),
     sidebarList,
     sidebarProjects,
     sidebarResizer
@@ -317,7 +318,7 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
         'button',
         {
           type: 'button',
-          className: 'rc-btn is-sm rc-btn-with-icon rc-desktop-only',
+          className: 'rc-btn is-sm rc-btn-with-icon rc-desktop-only rc-detail-refresh-btn',
           title: '拉取当前会话最新快照',
           onClick: () => handlers.onRefreshSelectedSnapshot?.(),
         },
@@ -590,6 +591,7 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
     viewerDrawer,
     filterRow,
     groupRow,
+    projFilterRow,
     sidebarList,
     sidebarProjects,
     detailTitle,

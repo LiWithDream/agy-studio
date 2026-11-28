@@ -31,7 +31,26 @@ export const STORAGE_KEYS = {
   sidebarWidth: 'agy_remote_sidebar_w',
   overviewWidth: 'agy_remote_overview_w',
   sidebarGroupBy: 'agy_remote_sidebar_group',
+  collapsedProjects: 'agy_remote_collapsed_projects',
 };
+
+export function readStoredJsonSet(key) {
+  try {
+    const raw = readStoredPref(key, '');
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? new Set(arr.map(String)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+export function writeStoredJsonSet(key, setObj) {
+  try {
+    const arr = setObj instanceof Set ? Array.from(setObj).slice(0, 80) : [];
+    writeStoredPref(key, JSON.stringify(arr));
+  } catch {}
+}
 
 export function readStoredPref(key, fallback) {
   try {

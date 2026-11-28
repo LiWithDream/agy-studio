@@ -38,12 +38,14 @@ import {
   createOpusGateActions,
   defaultOverviewCollapsed,
   loadConversationDraft,
+  readStoredJsonSet,
   readStoredPref,
   renderConnectionNoticeBar,
   renderSlashCommandBar,
   saveConversationDraft,
   syncTurboConfirmBar,
   triggerGuardedAuthReload,
+  writeStoredJsonSet,
   writeStoredPref,
 } from './mobile-enhancements.mjs';
 import { renderDetailTimeline as renderTimelineView } from './timeline-view.mjs';
@@ -113,6 +115,8 @@ const state = {
       ? storedOverviewCol === 'true'
       : defaultOverviewCollapsed(),
   sidebarGroupBy: storedGroupBy === 'project' ? 'project' : 'recent',
+  collapsedProjects: readStoredJsonSet(STORAGE_KEYS.collapsedProjects),
+  expandedProjectGroups: new Set(),
   draftText: '',
   draftMedia: [],
   draftIdempotencyKey: createIdempotencyKey(),
@@ -973,6 +977,7 @@ function renderTopStatus() {
     state.wsStatus === 'connected' && state.wsRttMs > 0 ? `${wsInfo.label} · ${state.wsRttMs}ms` : wsInfo.label;
 
   refs.hostPill.setAttribute('data-tone', state.hostAttached ? 'ok' : 'warn');
+  refs.hostPill.setAttribute('data-connected', state.hostAttached && state.wsStatus === 'connected' ? 'true' : 'false');
   refs.hostPill.textContent = state.hostAttached ? 'CDP' : '只读离线';
   refs.hostPill.title = state.hostAttached
     ? `CDP 实时 (${state.source || 'cdp'})`
@@ -1025,6 +1030,12 @@ function renderFilterChips() {
         wsClient.refreshList(state.includeSubagents).then(applyConvoListResult).catch(() => {});
       }
     },
+    onSelectProject: (nextPid) => {
+      state.selectedProjectId = nextPid || '';
+      renderStudioPanels();
+      renderFilterChips();
+      renderSidebarList();
+    },
   });
 }
 
@@ -1034,6 +1045,33 @@ function renderSidebarList() {
     refs: ensureWorkspaceShell(),
     resolvedLayoutMode: getResolvedLayoutMode(),
     onSelectConversation: selectConversation,
+    onToggleCollapseProject: (projKey) => {
+      if (!projKey) return;
+      if (state.collapsedProjects.has(projKey)) state.collapsedProjects.delete(projKey);
+      else state.collapsedProjects.add(projKey);
+      writeStoredJsonSet(STORAGE_KEYS.collapsedProjects, state.collapsedProjects);
+      renderSidebarList();
+    },
+    onExpandProjectGroup: (projKey) => {
+      if (!projKey) return;
+      state.expandedProjectGroups.add(projKey);
+      renderSidebarList();
+    },
+    onSelectProject: (nextPid) => {
+      state.selectedProjectId = nextPid || '';
+      renderStudioPanels();
+      renderFilterChips();
+      renderSidebarList();
+    },
+    onOpenProjectGit: ({ projectId }) => viewerCtrl.openGit({ projectId }),
+    onOpenNewChatInProject: (projectId) => {
+      state.newChatOpen = true;
+      state.newChatProjectId = projectId || '';
+      state.newChatError = '';
+      state.newChatTurboConfirmed = false;
+      mobileHistory.enterModal();
+      renderNewChatOverlay();
+    },
   });
 }
 
@@ -1096,6 +1134,7 @@ function refreshStudioOverview(cascadeId = state.selectedId) {
       state.studioOverview = ov;
       if (state.identity) {
         renderStudioPanels();
+        renderFilterChips();
         renderSidebarList();
         renderDetailTimeline();
         syncComposerControls();

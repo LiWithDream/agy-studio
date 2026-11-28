@@ -55,6 +55,8 @@ export function createSidebarRecentsModule(rt) {
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3" width="11.6" height="2.8" rx="0.8"/><path d="M3.2 5.8v6.4a1 1 0 0 0 1 1h7.6a1 1 0 0 0 1-1V5.8"/><path d="M6.4 8.8h3.2"/></svg>';
   const RECENT_TRASH_SVG =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5h10M6 4.5V3.3a.8.8 0 0 1 .8-.8h2.4a.8.8 0 0 1 .8.8v1.2"/><path d="M4.2 4.5l.7 8.1a1 1 0 0 0 1 .9h4.2a1 1 0 0 0 1-.9l.7-8.1"/></svg>';
+  const RECENT_COPY_SVG =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.2" y="5.2" width="8" height="8" rx="1.4"/><path d="M10.8 5.2V3.6a1.4 1.4 0 0 0-1.4-1.4H3.6a1.4 1.4 0 0 0-1.4 1.4v5.8a1.4 1.4 0 0 0 1.4 1.4h1.6"/></svg>';
 
   rtState.sidebarStoreRef = null;
   let sidebarStoreUnsub = null;
@@ -969,6 +971,33 @@ export function createSidebarRecentsModule(rt) {
     syncSidebarEnhancements();
   }
 
+  async function copyRecentText(text) {
+    const str = String(text || '');
+    if (!str) return false;
+    try {
+      if (typeof navigator === 'object' && navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(str);
+        return true;
+      }
+    } catch {}
+    try {
+      if (typeof document !== 'undefined' && document.body && typeof document.execCommand === 'function') {
+        const ta = document.createElement('textarea');
+        ta.value = str;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+        document.body.appendChild(ta);
+        try {
+          ta.select();
+          return Boolean(document.execCommand('copy'));
+        } finally {
+          ta.remove();
+        }
+      }
+    } catch {}
+    return false;
+  }
+
   function renderRecentRowMenu() {
     const st = recentMenuState;
     if (!st) {
@@ -1009,6 +1038,14 @@ export function createSidebarRecentsModule(rt) {
           }
           return;
         }
+        if (act === 'copy-id') {
+          const cid = cur.id;
+          closeRecentRowMenu();
+          copyRecentText(cid).then((ok) => {
+            if (ok) hooks.showProjectsFloatingNotice?.(L('已复制对话 ID', 'Conversation ID copied'));
+          });
+          return;
+        }
         if (act === 'archive') {
           closeRecentRowMenu();
           mutateRecentConversationAnnotation(cur.id, { archived: true }, bindings);
@@ -1039,12 +1076,13 @@ export function createSidebarRecentsModule(rt) {
       projPart +
       `<button type="button" class="ag-rm-item" data-ag-rm-act="pin"${canMutate ? '' : ' disabled'}>${RECENT_PIN_SVG}<span class="ag-rm-label">${escapeHtml(L('置顶对话', 'Pin'))}</span></button>` +
       `<button type="button" class="ag-rm-item" data-ag-rm-act="rename"${canMutate ? '' : ' disabled'}>${RECENT_RENAME_SVG}<span class="ag-rm-label">${escapeHtml(L('重命名', 'Rename'))}</span></button>` +
+      `<button type="button" class="ag-rm-item" data-ag-rm-act="copy-id" title="${escapeHtml(st.id)}">${RECENT_COPY_SVG}<span class="ag-rm-label">${escapeHtml(L('复制对话 ID', 'Copy Conversation ID'))}</span></button>` +
       `<button type="button" class="ag-rm-item" data-ag-rm-act="archive"${canMutate ? '' : ' disabled'}>${RECENT_ARCHIVE_SVG}<span class="ag-rm-label">${escapeHtml(L('归档', 'Archive'))}</span></button>` +
       `<div class="ag-rm-sep"></div>` +
       `<button type="button" class="ag-rm-item ag-rm-danger" data-ag-rm-act="delete" data-confirm="${st.confirmDelete ? '1' : '0'}"${canMutate ? '' : ' disabled'}>${RECENT_TRASH_SVG}<span class="ag-rm-label">${escapeHtml(delLabel)}</span></button>`;
 
     const menuW = 196;
-    const menuH = Math.max(152, menu.offsetHeight || 176);
+    const menuH = Math.max(180, menu.offsetHeight || 208);
     const vw = window.innerWidth || 1200;
     const vh = window.innerHeight || 800;
     const left = Math.min(Math.max(8, st.x), Math.max(8, vw - menuW - 8));
@@ -1055,7 +1093,7 @@ export function createSidebarRecentsModule(rt) {
     if (!recentMenuDocBound) {
       document.addEventListener('mousedown', onRecentMenuDocDown, true);
       document.addEventListener('keydown', onRecentMenuDocKey, true);
-      window.addEventListener('resize', closeRecentRowMenu);
+      window.addEventListener('resize', onRecentMenuResize);
       recentMenuDocBound = true;
     }
   }

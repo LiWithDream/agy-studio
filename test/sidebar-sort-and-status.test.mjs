@@ -564,6 +564,16 @@ test('built user/custom.js enforces sidebar anti-jump sort controls and 5-state 
       return Boolean(cond());
     };
 
+    const copiedTexts = [];
+    Object.defineProperty(window.navigator, 'clipboard', {
+      value: {
+        writeText: async (text) => {
+          copiedTexts.push(String(text));
+        },
+      },
+      configurable: true,
+    });
+
     window.ctx = { modules: { i18n: true, claudeUxHideSidebarProjects: false, claudeUxProjects: true }, onCleanup: () => {} };
     window.eval(customJsSrc);
     await waitFor(
@@ -591,16 +601,36 @@ test('built user/custom.js enforces sidebar anti-jump sort controls and 5-state 
     assert.equal(sbSec.querySelector('.ag-sbp-branch'), null, 'sidebar rows omit distracting inline worktree branch badges');
     assert.match(sbSec.querySelector(`[data-ag-sbp-id="${cidCmd}"]`).getAttribute('title'), /Worktree:\s*feat\/cmd-wt/);
 
-    // 2b. Verify `⋯` menu & contextmenu open #ag-recent-row-menu with data-maga-own="1", survive syncs, toggle, and support inline rename
+    // 2b. Verify `⋯` menu & contextmenu open #ag-recent-row-menu with data-maga-own="1", survive syncs, copy ID, close on resize, toggle, and support inline rename
     const cmdMenuBtn = sbSec.querySelector(`[data-ag-sbp-menu="${cidCmd}"]`);
     assert.ok(cmdMenuBtn);
     cmdMenuBtn.click();
     const rowMenu = doc.getElementById('ag-recent-row-menu');
     assert.ok(rowMenu, 'clicking ⋯ opens #ag-recent-row-menu');
     assert.equal(rowMenu.getAttribute('data-maga-own'), '1');
+    const copyIdBtn = rowMenu.querySelector('[data-ag-rm-act="copy-id"]');
+    assert.ok(copyIdBtn, 'row menu includes Copy Conversation ID item');
+    assert.equal(copyIdBtn.disabled, false);
+    assert.equal(copyIdBtn.getAttribute('title'), cidCmd);
     for (const fn of listeners) fn();
     await new Promise((r) => setTimeout(r, 120));
     assert.ok(rowMenu.isConnected && doc.getElementById('ag-recent-row-menu') === rowMenu, 'row menu stays open across sidebar syncs');
+    copyIdBtn.click();
+    assert.equal(doc.getElementById('ag-recent-row-menu'), null, 'clicking Copy Conversation ID closes row menu');
+    await waitFor(
+      () =>
+        copiedTexts.includes(cidCmd) &&
+        doc.getElementById('ag-projects-float-toast')?.textContent === '已复制对话 ID'
+    );
+    assert.deepEqual(copiedTexts, [cidCmd]);
+
+    cmdMenuBtn.click();
+    assert.ok(doc.getElementById('ag-recent-row-menu'), 'clicking ⋯ reopens row menu');
+    window.dispatchEvent(new window.Event('resize'));
+    assert.equal(doc.getElementById('ag-recent-row-menu'), null, 'window resize closes row menu via bound onRecentMenuResize');
+
+    cmdMenuBtn.click();
+    assert.ok(doc.getElementById('ag-recent-row-menu'), 'clicking ⋯ opens row menu before toggle close check');
     cmdMenuBtn.click();
     assert.equal(doc.getElementById('ag-recent-row-menu'), null, 'clicking ⋯ again closes row menu');
 

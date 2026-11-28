@@ -28,6 +28,7 @@ import {
 } from './studio-panel.mjs';
 import {
   STORAGE_KEYS,
+  applyThemePref,
   bindNativeAndroidBridge,
   bindViewportHeightSync,
   createAlertManager,
@@ -37,22 +38,28 @@ import {
   createOpusGateActions,
   defaultOverviewCollapsed,
   loadConversationDraft,
+  readStoredJsonSet,
   readStoredPref,
   renderConnectionNoticeBar,
   renderSlashCommandBar,
   saveConversationDraft,
   syncTurboConfirmBar,
   triggerGuardedAuthReload,
+  writeStoredJsonSet,
   writeStoredPref,
 } from './mobile-enhancements.mjs';
 import { renderDetailTimeline as renderTimelineView } from './timeline-view.mjs';
 import { createInitialViewerState, createViewerController } from './viewer-drawer.mjs';
 import {
   DESKTOP_BREAKPOINT_PX,
+  PANE_WIDTH_BOUNDS,
   UUID_RE,
+  clampPaneWidth,
   copyTextWithFeedback,
   formatPresetBadge,
+  getDefaultPaneWidth,
   isRunningStatus,
+  isSafeNonTurboPreset,
   mergeSummariesDelta,
   normalizeWsStatus,
   requiresTurboAck,
@@ -67,6 +74,9 @@ import { createIdempotencyKey, createRemoteWsClient } from './ws-client.mjs';
 const storedLayoutPref = readStoredPref(STORAGE_KEYS.layoutPref, 'auto');
 const initialLayoutPref =
   storedLayoutPref === 'desktop' || storedLayoutPref === 'mobile' ? storedLayoutPref : 'auto';
+const storedThemePref = readStoredPref(STORAGE_KEYS.themePref, 'auto');
+const initialThemePref =
+  storedThemePref === 'light' || storedThemePref === 'dark' ? storedThemePref : 'auto';
 const storedGroupBy = readStoredPref(STORAGE_KEYS.sidebarGroupBy, 'recent');
 const storedOverviewCol = readStoredPref(STORAGE_KEYS.overviewCollapsed, '');
 
@@ -98,12 +108,15 @@ const state = {
   mobileView: 'list', // list | detail
   mobileTab: 'chats', // chats | approvals | overview
   layoutPref: initialLayoutPref, // auto | desktop | mobile
+  themePref: initialThemePref, // auto | light | dark
   sidebarCollapsed: readStoredPref(STORAGE_KEYS.sidebarCollapsed, 'false') === 'true',
   overviewCollapsed:
     storedOverviewCol === 'true' || storedOverviewCol === 'false'
       ? storedOverviewCol === 'true'
       : defaultOverviewCollapsed(),
   sidebarGroupBy: storedGroupBy === 'project' ? 'project' : 'recent',
+  collapsedProjects: readStoredJsonSet(STORAGE_KEYS.collapsedProjects),
+  expandedProjectGroups: new Set(),
   draftText: '',
   draftMedia: [],
   draftIdempotencyKey: createIdempotencyKey(),
@@ -192,14 +205,68 @@ function layoutButtonLabel(pref) {
   return '视图: 自动';
 }
 
+function themeButtonLabel(pref) {
+  if (pref === 'light') return '外观: 浅色';
+  if (pref === 'dark') return '外观: 深色';
+  return '外观: 跟随系统';
+}
+
+function syncPaneAriaValues(viewportWidth, sbRes, ovRes) {
+  if (!workspaceRefs) return;
+  if (workspaceRefs.sidebarResizer) {
+    workspaceRefs.sidebarResizer.setAttribute('aria-valuemin', String(sbRes.min));
+    workspaceRefs.sidebarResizer.setAttribute('aria-valuemax', String(sbRes.max));
+    workspaceRefs.sidebarResizer.setAttribute('aria-valuenow', String(sbRes.value));
+  }
+  if (workspaceRefs.overviewResizer) {
+    workspaceRefs.overviewResizer.setAttribute('aria-valuemin', String(ovRes.min));
+    workspaceRefs.overviewResizer.setAttribute('aria-valuemax', String(ovRes.max));
+    workspaceRefs.overviewResizer.setAttribute('aria-valuenow', String(ovRes.value));
+  }
+}
+
 function applyLayoutAttrs() {
   if (!rootEl) return;
+  applyThemePref(state.themePref);
   const resolvedMode = getResolvedLayoutMode();
+  const vw = typeof window !== 'undefined' ? Number(window.innerWidth || DESKTOP_BREAKPOINT_PX) : DESKTOP_BREAKPOINT_PX;
   rootEl.setAttribute('data-layout-mode', resolvedMode);
   rootEl.setAttribute('data-mobile-view', state.mobileView);
   rootEl.setAttribute('data-mobile-tab', state.mobileTab);
   rootEl.setAttribute('data-sidebar-collapsed', state.sidebarCollapsed ? 'true' : 'false');
   rootEl.setAttribute('data-overview-collapsed', state.overviewCollapsed ? 'true' : 'false');
+
+  const rawSb = Number(readStoredPref(STORAGE_KEYS.sidebarWidth, ''));
+  const rawOv = Number(readStoredPref(STORAGE_KEYS.overviewWidth, ''));
+  const hasStoredSb = Number.isFinite(rawSb) && rawSb >= PANE_WIDTH_BOUNDS.sidebar.min;
+  const hasStoredOv = Number.isFinite(rawOv) && rawOv >= PANE_WIDTH_BOUNDS.overview.min;
+  const defSb = getDefaultPaneWidth('sidebar', vw);
+  const defOv = getDefaultPaneWidth('overview', vw);
+  const initOv = hasStoredOv ? Math.min(PANE_WIDTH_BOUNDS.overview.max, Math.round(rawOv)) : defOv;
+  const sbRes = clampPaneWidth('sidebar', hasStoredSb ? rawSb : defSb, {
+    viewportWidth: vw,
+    otherPaneWidth: state.overviewCollapsed ? 0 : initOv,
+    otherCollapsed: state.overviewCollapsed,
+  });
+  const ovRes = clampPaneWidth('overview', hasStoredOv ? rawOv : defOv, {
+    viewportWidth: vw,
+    otherPaneWidth: state.sidebarCollapsed ? 0 : sbRes.value,
+    otherCollapsed: state.sidebarCollapsed,
+  });
+
+  if (rootEl.style?.setProperty) {
+    if (resolvedMode === 'desktop' && (hasStoredSb || sbRes.value < defSb)) {
+      rootEl.style.setProperty('--rc-sidebar-w', `${sbRes.value}px`);
+    } else {
+      rootEl.style.removeProperty('--rc-sidebar-w');
+    }
+    if (resolvedMode === 'desktop' && (hasStoredOv || ovRes.value < defOv)) {
+      rootEl.style.setProperty('--rc-overview-w', `${ovRes.value}px`);
+    } else {
+      rootEl.style.removeProperty('--rc-overview-w');
+    }
+  }
+  syncPaneAriaValues(vw, sbRes, ovRes);
 
   if (workspaceRefs && rootEl.contains(workspaceRefs.topbar)) {
     workspaceRefs.layoutModeBtn.textContent = layoutButtonLabel(state.layoutPref);
@@ -211,7 +278,9 @@ function applyLayoutAttrs() {
     workspaceRefs.draftInput.placeholder =
       resolvedMode === 'mobile'
         ? '输入指令…'
-        : '输入指令继续当前会话（Ctrl/Cmd + Enter 发送，可 Ctrl/Cmd+V 粘贴截图）…';
+        : vw <= 1260
+          ? '输入指令继续当前会话（⌘/Ctrl+Enter 发送，支持粘贴截图）…'
+          : '输入指令继续当前会话（Ctrl/Cmd + Enter 发送，可 Ctrl/Cmd+V 粘贴截图）…';
     workspaceRefs.searchInput.placeholder =
       resolvedMode === 'mobile' ? '搜索会话 / ID…' : '搜索会话 (⌘K) / ID…';
     renderMoreMenu();
@@ -263,6 +332,12 @@ function ensureGlobalUiListeners() {
       ev.preventDefault();
       state.sidebarCollapsed = !state.sidebarCollapsed;
       writeStoredPref(STORAGE_KEYS.sidebarCollapsed, state.sidebarCollapsed ? 'true' : 'false');
+      applyLayoutAttrs();
+    } else if (ev.key === '.' && !ev.shiftKey) {
+      if (getResolvedLayoutMode() !== 'desktop') return;
+      ev.preventDefault();
+      state.overviewCollapsed = !state.overviewCollapsed;
+      writeStoredPref(STORAGE_KEYS.overviewCollapsed, state.overviewCollapsed ? 'true' : 'false');
       applyLayoutAttrs();
     }
   });
@@ -355,6 +430,14 @@ const moreMenuCtrl = createMoreMenuController({
   renderMenu: renderMobileMoreMenu,
   formatPresetBadge,
   layoutButtonLabel,
+  themeButtonLabel,
+  writeThemePref: (v) => writeStoredPref(STORAGE_KEYS.themePref, v),
+  getLayoutMode: getResolvedLayoutMode,
+  onToggleDesktopOverview: () => {
+    state.overviewCollapsed = !state.overviewCollapsed;
+    writeStoredPref(STORAGE_KEYS.overviewCollapsed, state.overviewCollapsed ? 'true' : 'false');
+    applyLayoutAttrs();
+  },
   alertManager,
   setActionNotice,
   writeLayoutPref: (v) => writeStoredPref(STORAGE_KEYS.layoutPref, v),
@@ -403,6 +486,31 @@ function ensureWorkspaceShell() {
         state.overviewCollapsed = !state.overviewCollapsed;
         writeStoredPref(STORAGE_KEYS.overviewCollapsed, state.overviewCollapsed ? 'true' : 'false');
         applyLayoutAttrs();
+      },
+      onResizePane: (kind, widthPx, { commit = false } = {}) => {
+        const cssVar = kind === 'sidebar' ? '--rc-sidebar-w' : '--rc-overview-w';
+        const storeKey = kind === 'sidebar' ? STORAGE_KEYS.sidebarWidth : STORAGE_KEYS.overviewWidth;
+        const vw = typeof window !== 'undefined' ? Number(window.innerWidth || DESKTOP_BREAKPOINT_PX) : DESKTOP_BREAKPOINT_PX;
+        if (widthPx === null) {
+          rootEl?.style?.removeProperty?.(cssVar);
+          if (commit) {
+            writeStoredPref(storeKey, '');
+            applyLayoutAttrs();
+          }
+          return;
+        }
+        const otherPane = kind === 'sidebar' ? workspaceRefs?.overviewPane : workspaceRefs?.sidebar;
+        const otherCollapsed = kind === 'sidebar' ? state.overviewCollapsed : state.sidebarCollapsed;
+        const clamped = clampPaneWidth(kind, widthPx, {
+          viewportWidth: vw,
+          otherPaneWidth: otherCollapsed ? 0 : Math.round(otherPane?.getBoundingClientRect?.().width || 0),
+          otherCollapsed,
+        });
+        rootEl?.style?.setProperty?.(cssVar, `${clamped.value}px`);
+        const resizerEl = kind === 'sidebar' ? workspaceRefs?.sidebarResizer : workspaceRefs?.overviewResizer;
+        resizerEl?.setAttribute('aria-valuemax', String(clamped.max));
+        resizerEl?.setAttribute('aria-valuenow', String(clamped.value));
+        if (commit) writeStoredPref(storeKey, String(clamped.value));
       },
       onRefreshAll: () => refreshAllData(),
       onUnpair: () => handleUnpairDevice(),
@@ -869,13 +977,18 @@ function renderTopStatus() {
     state.wsStatus === 'connected' && state.wsRttMs > 0 ? `${wsInfo.label} · ${state.wsRttMs}ms` : wsInfo.label;
 
   refs.hostPill.setAttribute('data-tone', state.hostAttached ? 'ok' : 'warn');
-  refs.hostPill.textContent = state.hostAttached
+  refs.hostPill.setAttribute('data-connected', state.hostAttached && state.wsStatus === 'connected' ? 'true' : 'false');
+  refs.hostPill.textContent = state.hostAttached ? 'CDP' : '只读离线';
+  refs.hostPill.title = state.hostAttached
     ? `CDP 实时 (${state.source || 'cdp'})`
     : '宿主离线 · 磁盘只读';
 
   const presetInfo = formatPresetBadge(state.globalPreset);
+  const isSafePreset = isSafeNonTurboPreset(state.globalPreset);
   refs.presetPill.setAttribute('data-tone', presetInfo.tone);
-  refs.presetPill.textContent = presetInfo.label;
+  refs.presetPill.setAttribute('data-safe', isSafePreset ? 'true' : 'false');
+  refs.presetPill.textContent = Number(state.globalPreset) === 3 ? 'TURBO' : presetInfo.label;
+  refs.presetPill.title = `本机权限策略：${presetInfo.label}`;
 
   const devName = state.identity?.deviceName || '已配对设备';
   const role = state.identity?.role || 'observe';
@@ -917,6 +1030,12 @@ function renderFilterChips() {
         wsClient.refreshList(state.includeSubagents).then(applyConvoListResult).catch(() => {});
       }
     },
+    onSelectProject: (nextPid) => {
+      state.selectedProjectId = nextPid || '';
+      renderStudioPanels();
+      renderFilterChips();
+      renderSidebarList();
+    },
   });
 }
 
@@ -926,6 +1045,33 @@ function renderSidebarList() {
     refs: ensureWorkspaceShell(),
     resolvedLayoutMode: getResolvedLayoutMode(),
     onSelectConversation: selectConversation,
+    onToggleCollapseProject: (projKey) => {
+      if (!projKey) return;
+      if (state.collapsedProjects.has(projKey)) state.collapsedProjects.delete(projKey);
+      else state.collapsedProjects.add(projKey);
+      writeStoredJsonSet(STORAGE_KEYS.collapsedProjects, state.collapsedProjects);
+      renderSidebarList();
+    },
+    onExpandProjectGroup: (projKey) => {
+      if (!projKey) return;
+      state.expandedProjectGroups.add(projKey);
+      renderSidebarList();
+    },
+    onSelectProject: (nextPid) => {
+      state.selectedProjectId = nextPid || '';
+      renderStudioPanels();
+      renderFilterChips();
+      renderSidebarList();
+    },
+    onOpenProjectGit: ({ projectId }) => viewerCtrl.openGit({ projectId }),
+    onOpenNewChatInProject: (projectId) => {
+      state.newChatOpen = true;
+      state.newChatProjectId = projectId || '';
+      state.newChatError = '';
+      state.newChatTurboConfirmed = false;
+      mobileHistory.enterModal();
+      renderNewChatOverlay();
+    },
   });
 }
 
@@ -988,6 +1134,7 @@ function refreshStudioOverview(cascadeId = state.selectedId) {
       state.studioOverview = ov;
       if (state.identity) {
         renderStudioPanels();
+        renderFilterChips();
         renderSidebarList();
         renderDetailTimeline();
         syncComposerControls();
@@ -1335,6 +1482,7 @@ function startWorkspaceSession() {
 }
 
 async function boot() {
+  applyThemePref(state.themePref);
   bindViewportHeightSync();
   bindNativeAndroidBridge({
     state,

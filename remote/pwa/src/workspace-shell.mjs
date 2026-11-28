@@ -2,51 +2,76 @@
  * AGY Studio Remote PWA — Workspace Shell DOM Builder & Project Filter Strip
  * Strict invariant: NEVER use unsafe HTML injection APIs; build DOM with createElement + textContent only.
  */
-import { clearNode, el } from './ui-helpers.mjs';
+import { clampPaneWidth, clearNode, createSvgIcon, el, getDefaultPaneWidth } from './ui-helpers.mjs';
 
 export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, handlers = {} }) {
   clearNode(rootEl);
 
   const brandDot = el('span', { className: 'rc-brand-dot' });
   const wsPill = el('span', { className: 'rc-pill' });
-  const hostPill = el('span', { className: 'rc-pill rc-desktop-only' });
-  const presetPill = el('span', { className: 'rc-pill rc-desktop-only' });
-  const devicePill = el('span', { className: 'rc-pill rc-desktop-only' });
+  const hostPill = el('span', { className: 'rc-pill rc-desktop-only rc-topbar-host' });
+  const presetPill = el('span', { className: 'rc-pill rc-desktop-only rc-topbar-preset' });
+  const devicePill = el('span', { className: 'rc-pill rc-desktop-only rc-topbar-device' });
 
-  const sidebarToggleBtn = el('button', {
-    type: 'button',
-    className: 'rc-btn is-sm is-ghost rc-desktop-only',
-    title: '折叠或展开会话栏 (Cmd/Ctrl+B)',
-    text: '☰',
-    onClick: () => handlers.onToggleSidebar?.(),
-  });
+  const sidebarToggleBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'rc-topbar-icon-btn rc-desktop-only',
+      'aria-label': '折叠或展开会话栏',
+      title: '折叠或展开会话栏 (⌘B)',
+      onClick: () => handlers.onToggleSidebar?.(),
+    },
+    createSvgIcon('sidebar', { size: 15 })
+  );
 
   const layoutModeBtn = el('button', {
     type: 'button',
-    className: 'rc-btn is-sm rc-desktop-only',
+    className: 'rc-btn is-sm rc-desktop-only rc-topbar-layout',
     title: '切换桌面 / 移动视图适配模式',
     text: layoutButtonLabel(state.layoutPref),
     onClick: () => handlers.onCycleLayoutMode?.(),
   });
 
-  const overviewToggleBtn = el('button', {
-    type: 'button',
-    className: 'rc-btn is-sm rc-desktop-only',
-    title: '折叠或展开右侧 Overview 面板',
-    text: '概览',
-    onClick: () => handlers.onToggleOverview?.(),
-  });
+  const overviewToggleBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'rc-topbar-icon-btn rc-desktop-only',
+      title: '折叠或展开右侧 Overview 面板 (⌘.)',
+      onClick: () => handlers.onToggleOverview?.(),
+    },
+    createSvgIcon('overview', { size: 15 }),
+    el('span', { text: '概览' })
+  );
 
-  const refreshBtn = el('button', {
-    type: 'button',
-    className: 'rc-btn is-sm rc-desktop-only',
-    text: '刷新',
-    onClick: () => handlers.onRefreshAll?.(),
-  });
+  const refreshBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'rc-topbar-icon-btn rc-desktop-only',
+      'aria-label': '刷新全部数据',
+      title: '刷新全部数据',
+      onClick: () => handlers.onRefreshAll?.(),
+    },
+    createSvgIcon('refresh', { size: 15 })
+  );
+
+  const desktopMoreBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'rc-topbar-icon-btn rc-desktop-only',
+      'aria-label': '更多设置与连接信息',
+      title: '主题、视图、设备与重配对',
+      onClick: (ev) => handlers.onToggleMoreMenu?.(ev),
+    },
+    createSvgIcon('more', { size: 15 })
+  );
 
   const unpairBtn = el('button', {
     type: 'button',
-    className: 'rc-btn is-sm is-danger rc-desktop-only',
+    className: 'rc-btn is-sm is-danger rc-desktop-only rc-topbar-unpair',
     text: '重配对',
     onClick: () => handlers.onUnpair?.(),
   });
@@ -91,6 +116,7 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
       layoutModeBtn,
       refreshBtn,
       overviewToggleBtn,
+      desktopMoreBtn,
       unpairBtn,
       mobileRefreshBtn,
       mobileMoreBtn
@@ -119,14 +145,132 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
   const searchRow = el('div', { className: 'rc-search-row' }, searchInput, newChatBtn);
   const filterRow = el('div', { className: 'rc-filter-row' });
   const groupRow = el('div', { className: 'rc-group-row' });
+  const projFilterRow = el('div', { className: 'rc-proj-filter-row rc-hidden' });
   const sidebarList = el('div', { className: 'rc-scroll-list' });
   const sidebarProjects = el('div', { className: 'rc-sidebar-projects rc-hidden' });
+  sidebarProjects.addEventListener(
+    'wheel',
+    (ev) => {
+      if (sidebarProjects.scrollWidth <= sidebarProjects.clientWidth) return;
+      if (Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) {
+        sidebarProjects.scrollLeft += ev.deltaY;
+        ev.preventDefault();
+      }
+    },
+    { passive: false }
+  );
+  const sidebarResizer = el('div', {
+    className: 'rc-pane-resizer is-left rc-desktop-only',
+    title: '拖拽或方向键调整会话栏宽度（双击或按 Enter 重置）',
+    role: 'separator',
+    tabindex: '0',
+    'aria-label': '调整会话栏宽度',
+    'aria-orientation': 'vertical',
+    'aria-valuemin': '200',
+    'aria-valuemax': '420',
+    'aria-valuenow': '264',
+  });
+  const bindPaneResizer = (handleEl, kind) => {
+    if (!handleEl || typeof window === 'undefined') return;
+    const getClampOpts = () => {
+      const otherPane = kind === 'sidebar' ? overviewPane : sidebar;
+      const otherCollapsed = kind === 'sidebar' ? Boolean(state.overviewCollapsed) : Boolean(state.sidebarCollapsed);
+      const otherPaneWidth = otherCollapsed ? 0 : Math.round(otherPane.getBoundingClientRect().width) || 0;
+      return {
+        viewportWidth: Number(window.innerWidth || 0),
+        otherPaneWidth,
+        otherCollapsed,
+      };
+    };
+    const commitReset = () => handlers.onResizePane?.(kind, null, { commit: true });
+    handleEl.addEventListener('dblclick', commitReset);
+    handleEl.addEventListener('keydown', (ev) => {
+      const k = ev.key;
+      if (k !== 'ArrowLeft' && k !== 'ArrowRight' && k !== 'Home' && k !== 'End' && k !== 'Enter' && k !== ' ') {
+        return;
+      }
+      ev.preventDefault();
+      if (k === 'Enter' || k === ' ') {
+        commitReset();
+        return;
+      }
+      const clampOpts = getClampOpts();
+      const targetPane = kind === 'sidebar' ? sidebar : overviewPane;
+      const fallback = getDefaultPaneWidth(kind, clampOpts.viewportWidth);
+      const currentW = Math.round(targetPane.getBoundingClientRect().width) || fallback;
+      const bounds = clampPaneWidth(kind, currentW, clampOpts);
+      if (k === 'Home') {
+        handlers.onResizePane?.(kind, bounds.min, { commit: true });
+        return;
+      }
+      if (k === 'End') {
+        handlers.onResizePane?.(kind, bounds.max, { commit: true });
+        return;
+      }
+      const step = ev.shiftKey ? 32 : 16;
+      const delta = k === 'ArrowRight' ? (kind === 'sidebar' ? step : -step) : kind === 'sidebar' ? -step : step;
+      const next = clampPaneWidth(kind, currentW + delta, clampOpts);
+      handlers.onResizePane?.(kind, next.value, { commit: true });
+    });
+    handleEl.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      const pointerId = ev.pointerId;
+      try {
+        handleEl.setPointerCapture?.(pointerId);
+      } catch {}
+      const startX = ev.clientX;
+      const targetPane = kind === 'sidebar' ? sidebar : overviewPane;
+      const clampOpts = getClampOpts();
+      const fallback = getDefaultPaneWidth(kind, clampOpts.viewportWidth);
+      const startW = Math.round(targetPane.getBoundingClientRect().width) || fallback;
+      rootEl.setAttribute('data-resizing', 'true');
+      handleEl.classList.add('is-active');
+      let rafId = 0;
+      let pendingWidth = startW;
+      const flushMove = () => {
+        rafId = 0;
+        handlers.onResizePane?.(kind, pendingWidth, { commit: false });
+      };
+      const computeNext = (clientX) => {
+        const dx = clientX - startX;
+        return clampPaneWidth(kind, kind === 'sidebar' ? startW + dx : startW - dx, clampOpts).value;
+      };
+      const onMove = (moveEv) => {
+        pendingWidth = computeNext(moveEv.clientX);
+        if (typeof window.requestAnimationFrame === 'function') {
+          if (!rafId) rafId = window.requestAnimationFrame(flushMove);
+        } else {
+          flushMove();
+        }
+      };
+      const onUp = (upEv) => {
+        if (rafId) {
+          window.cancelAnimationFrame?.(rafId);
+          rafId = 0;
+        }
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        try {
+          if (handleEl.hasPointerCapture?.(pointerId)) handleEl.releasePointerCapture(pointerId);
+        } catch {}
+        rootEl.removeAttribute('data-resizing');
+        handleEl.classList.remove('is-active');
+        handlers.onResizePane?.(kind, computeNext(upEv.clientX), { commit: true });
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+    });
+  };
   const sidebar = el(
     'aside',
     { className: 'rc-sidebar' },
-    el('div', { className: 'rc-sidebar-head' }, searchRow, filterRow, groupRow),
+    el('div', { className: 'rc-sidebar-head' }, searchRow, filterRow, groupRow, projFilterRow),
     sidebarList,
-    sidebarProjects
+    sidebarProjects,
+    sidebarResizer
   );
 
   const detailTitle = el('h2', { className: 'rc-detail-title', text: '请选择一个会话' });
@@ -148,26 +292,39 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
     el(
       'div',
       { className: 'rc-detail-actions' },
-      el('button', {
-        type: 'button',
-        className: 'rc-btn is-sm rc-desktop-only',
-        text: '文档',
-        title: '查看当前会话 Markdown 文档 (Artifacts)',
-        onClick: () => handlers.onOpenArtifacts?.(),
-      }),
-      el('button', {
-        type: 'button',
-        className: 'rc-btn is-sm rc-desktop-only',
-        text: 'Git',
-        title: '查看仓库 Git 变更与 Diff',
-        onClick: () => handlers.onOpenGitDiff?.(),
-      }),
-      el('button', {
-        type: 'button',
-        className: 'rc-btn is-sm rc-desktop-only',
-        text: '拉取快照',
-        onClick: () => handlers.onRefreshSelectedSnapshot?.(),
-      }),
+      el(
+        'button',
+        {
+          type: 'button',
+          className: 'rc-btn is-sm rc-btn-with-icon rc-desktop-only',
+          title: '查看当前会话 Markdown 文档 (Artifacts)',
+          onClick: () => handlers.onOpenArtifacts?.(),
+        },
+        createSvgIcon('doc', { size: 13 }),
+        el('span', { text: '文档' })
+      ),
+      el(
+        'button',
+        {
+          type: 'button',
+          className: 'rc-btn is-sm rc-btn-with-icon rc-desktop-only',
+          title: '查看仓库 Git 变更与 Diff',
+          onClick: () => handlers.onOpenGitDiff?.(),
+        },
+        createSvgIcon('git', { size: 13 }),
+        el('span', { text: 'Git' })
+      ),
+      el(
+        'button',
+        {
+          type: 'button',
+          className: 'rc-btn is-sm rc-btn-with-icon rc-desktop-only rc-detail-refresh-btn',
+          title: '拉取当前会话最新快照',
+          onClick: () => handlers.onRefreshSelectedSnapshot?.(),
+        },
+        createSvgIcon('refresh', { size: 13 }),
+        el('span', { text: '刷新' })
+      ),
       el('button', {
         type: 'button',
         className: 'rc-icon-btn rc-mobile-only',
@@ -201,17 +358,21 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
   roleBanner.append(roleBannerText, roleBannerPill);
 
   const timeline = el('div', { className: 'rc-timeline' });
-  const scrollFab = el('button', {
-    type: 'button',
-    className: 'rc-scroll-fab rc-hidden',
-    'aria-label': '回到底部',
-    title: '回到底部',
-    text: '↓',
-    onClick: () => {
-      timeline.scrollTop = timeline.scrollHeight;
-      scrollFab.classList.add('rc-hidden');
+  const scrollFab = el(
+    'button',
+    {
+      type: 'button',
+      className: 'rc-scroll-fab rc-hidden',
+      'aria-label': '回到底部',
+      title: '回到底部',
+      onClick: () => {
+        timeline.scrollTop = timeline.scrollHeight;
+        scrollFab.classList.add('rc-hidden');
+      },
     },
-  });
+    createSvgIcon('arrowDown', { size: 13 }),
+    el('span', { className: 'rc-desktop-only', text: '回到底部' })
+  );
   timeline.addEventListener('scroll', () => {
     const gap = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
     if (gap > 140) {
@@ -328,16 +489,30 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
     )
   );
 
+  const overviewResizer = el('div', {
+    className: 'rc-pane-resizer is-right rc-desktop-only',
+    title: '拖拽或方向键调整概览栏宽度（双击或按 Enter 重置）',
+    role: 'separator',
+    tabindex: '0',
+    'aria-label': '调整概览栏宽度',
+    'aria-orientation': 'vertical',
+    'aria-valuemin': '240',
+    'aria-valuemax': '440',
+    'aria-valuenow': '296',
+  });
   const detail = el(
     'section',
     { className: 'rc-detail' },
     detailHead,
     roleBanner,
     timelineWrap,
-    bottomDock
+    bottomDock,
+    overviewResizer
   );
 
   const overviewPane = el('aside', { className: 'rc-overview' });
+  bindPaneResizer(sidebarResizer, 'sidebar');
+  bindPaneResizer(overviewResizer, 'overview');
 
   const navChatsBtn = el('button', {
     type: 'button',
@@ -381,6 +556,7 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
     sidebarToggleBtn,
     layoutModeBtn,
     overviewToggleBtn,
+    desktopMoreBtn,
     brandDot,
     wsPill,
     hostPill,
@@ -415,6 +591,7 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
     viewerDrawer,
     filterRow,
     groupRow,
+    projFilterRow,
     sidebarList,
     sidebarProjects,
     detailTitle,
@@ -422,6 +599,9 @@ export function createWorkspaceShellDom({ rootEl, state, layoutButtonLabel, hand
     timeline,
     scrollFab,
     overviewPane,
+    sidebar,
+    sidebarResizer,
+    overviewResizer,
     mobileNav,
     navChatsBtn,
     navApprovalsBtn,

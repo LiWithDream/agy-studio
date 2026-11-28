@@ -353,8 +353,17 @@ test('Static security & MAGA architecture invariants for remote control modules'
     );
   }
 
-  const pwaCss = fs.readFileSync(path.join(PWA_DIR, 'src', 'styles.css'), 'utf8');
-  assert.equal(pwaCss.includes(':has('), false, 'remote/pwa/src/styles.css must have zero :has() selectors');
+  const pwaCssFiles = collectFiles(PWA_DIR, {
+    exts: ['.css'],
+    skipDirs: ['dist'],
+  });
+  assert.ok(pwaCssFiles.length >= 2, 'expected root styles.css and styles/ partials');
+  for (const cssPath of pwaCssFiles) {
+    const cssSrc = fs.readFileSync(cssPath, 'utf8');
+    const rel = path.relative(REPO, cssPath);
+    assert.equal(cssSrc.includes(':has('), false, `${rel} must have zero :has() selectors`);
+    assert.equal(cssSrc.includes('height: 100dvh'), false, `${rel} must avoid height: 100dvh`);
+  }
 
   assert.equal(
     transportMod.STRICT_CSP,

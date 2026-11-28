@@ -387,7 +387,19 @@ function decodeProtoStepFields(row) {
       });
     }
   } else if (row.step_type === 17) {
-    text = asUtf8(row.error_details);
+    const f24 = payloadMap.get(24)?.[0];
+    if (f24 instanceof Uint8Array) {
+      const m24 = parsePbMap(f24);
+      const f3 = m24.get(3)?.[0];
+      if (f3 instanceof Uint8Array) {
+        const m3 = parsePbMap(f3);
+        text = asUtf8(m3.get(2)?.[0]) || asUtf8(m3.get(1)?.[0]) || asUtf8(m3.get(3)?.[0]);
+      }
+      if (!text) {
+        text = asUtf8(m24.get(2)?.[0]) || asUtf8(m24.get(1)?.[0]);
+      }
+    }
+    if (!text) text = asUtf8(row.error_details);
   }
 
   let error = null;
@@ -395,6 +407,9 @@ function decodeProtoStepFields(row) {
     const errMap = parsePbMap(row.error_details);
     const msg = asUtf8(errMap.get(1)?.[0]) || asUtf8(errMap.get(2)?.[0]) || asUtf8(row.error_details);
     if (msg) error = { message: truncateText(msg, 2048) };
+  }
+  if (!error && text && row.step_type === 17) {
+    error = { message: truncateText(text, 2048) };
   }
 
   return { createdAt, text, thinking, toolCalls, error };

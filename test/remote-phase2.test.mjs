@@ -20,6 +20,17 @@ const GW_DIR = path.join(REPO, 'remote', 'gateway');
 const PWA_DIR = path.join(REPO, 'remote', 'pwa');
 
 const configMod = await import(pathToFileURL(path.join(GW_DIR, 'config.mjs')).href);
+
+function collectCssFilesRecursive(dir) {
+  const out = [];
+  if (!fs.existsSync(dir)) return out;
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, ent.name);
+    if (ent.isDirectory()) out.push(...collectCssFilesRecursive(abs));
+    else if (ent.isFile() && ent.name.endsWith('.css')) out.push(abs);
+  }
+  return out;
+}
 const serverMod = await import(pathToFileURL(path.join(GW_DIR, 'server.mjs')).href);
 const lockMod = await import(pathToFileURL(path.join(REPO, 'core', 'daemon', 'remote', 'cascade-lock.mjs')).href);
 const studioBridgeMod = await import(pathToFileURL(path.join(REPO, 'core', 'daemon', 'remote', 'studio-bridge.mjs')).href);
@@ -749,8 +760,17 @@ test('Phase 2 static invariants: 7 gateway files, <2000 lines, Zero-XSS across a
       `PWA module ${fname} must not contain XSS sinks`
     );
   }
-  const cssSrc = fs.readFileSync(path.join(PWA_DIR, 'src', 'styles.css'), 'utf8');
-  assert.equal(cssSrc.includes(':has('), false);
+  const pwaCssFiles = collectCssFilesRecursive(path.join(PWA_DIR, 'src'));
+  assert.ok(pwaCssFiles.length >= 2, 'expected root styles.css plus modular desktop stylesheets');
+  for (const cssAbs of pwaCssFiles) {
+    const cssText = fs.readFileSync(cssAbs, 'utf8');
+    const rel = path.relative(REPO, cssAbs);
+    if (path.basename(cssAbs) !== 'styles.css') {
+      assert.ok(cssText.split('\n').length < 2000, `${rel} must stay < 2000 lines`);
+    }
+    assert.equal(cssText.includes(':has('), false, `${rel} must not contain :has(`);
+    assert.equal(cssText.includes('height: 100dvh'), false, `${rel} must not contain height: 100dvh`);
+  }
 
   const appSrc = fs.readFileSync(path.join(PWA_DIR, 'src', 'app.mjs'), 'utf8');
   assert.match(appSrc, /workspaceRefs\s*=\s*\{\s*topbar,/);
@@ -3329,6 +3349,296 @@ test('Phase 2 v1.4.1 live role promotion push (ws-server -> ws-client) and epoch
     restore('localStorage', origLs);
     for (const s of openSockets) s.destroy();
     await gw?.close().catch(() => {});
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('Remote Desktop Workbench UI: CSS bundle/invariants, pane clamp, theme switch, overview dots, git scope & error collapse', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'maga-rem-workbench-'));
+  const distOut = path.join(tmpRoot, 'dist');
+  const { buildRemotePwa } = await import(pathToFileURL(path.join(REPO, 'studio', 'build.mjs')).href);
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: 'http://127.0.0.1/' });
+  const prevDoc = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const prevWin = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'document', { value: dom.window.document, configurable: true, writable: true });
+  Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true, writable: true });
+
+  try {
+    // 1. buildRemotePwa bundles @import "./styles/desktop-workbench.css" and enforces zero :has() / 100dvh
+    await buildRemotePwa({ outDir: distOut });
+    const bundledCss = fs.readFileSync(path.join(distOut, 'styles.css'), 'utf8');
+    assert.ok(bundledCss.includes('--rc-sidebar-w') && bundledCss.includes('.rc-pane-resizer'));
+    assert.ok(bundledCss.includes(':root[data-theme=light]') && bundledCss.includes(':root[data-theme=dark]'));
+    assert.ok(bundledCss.includes('height: var(--rc-app-h, 100%)') && bundledCss.includes('color-scheme: light dark'));
+    assert.equal(bundledCss.includes(':has('), false);
+    assert.equal(bundledCss.includes('height: 100dvh'), false);
+
+    // 2. Joint pane width clamp respects viewportWidth - otherPaneWidth - 480
+    const uiHelpersMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'ui-helpers.mjs')).href);
+    assert.equal(uiHelpersMod.getDefaultPaneWidth('sidebar', 1080), 236);
+    assert.equal(uiHelpersMod.getDefaultPaneWidth('overview', 1600), 316);
+    const clamped1080 = uiHelpersMod.clampPaneWidth('sidebar', 420, {
+      viewportWidth: 1080,
+      otherPaneWidth: 264,
+      otherCollapsed: false,
+    });
+    assert.equal(clamped1080.max, 336);
+    assert.equal(clamped1080.value, 336);
+    const collapsedOther = uiHelpersMod.clampPaneWidth('sidebar', 420, {
+      viewportWidth: 1080,
+      otherPaneWidth: 264,
+      otherCollapsed: true,
+    });
+    assert.equal(collapsedOther.value, 420);
+
+    // 3. Theme switch updates data-theme & live theme-color meta
+    const mobileEnhMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'mobile-enhancements.mjs')).href);
+    const doc = dom.window.document;
+    mobileEnhMod.applyThemePref('dark');
+    assert.equal(doc.documentElement.getAttribute('data-theme'), 'dark');
+    assert.equal(doc.getElementById('rc-theme-color-live')?.getAttribute('content'), '#212120');
+    mobileEnhMod.applyThemePref('light');
+    assert.equal(doc.documentElement.getAttribute('data-theme'), 'light');
+    assert.equal(doc.getElementById('rc-theme-color-live')?.getAttribute('content'), '#ffffff');
+    mobileEnhMod.applyThemePref('auto');
+    assert.equal(doc.documentElement.hasAttribute('data-theme'), false);
+
+    // 4. Overview panel renders legend dots & usage col track cleanly without setAttribute('style')
+    const overviewMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'overview-panel.mjs')).href);
+    const overviewSrc = fs.readFileSync(path.join(PWA_DIR, 'src', 'overview-panel.mjs'), 'utf8');
+    assert.equal(overviewSrc.includes("setAttribute('style'"), false);
+    const ovHost = doc.createElement('div');
+    overviewMod.renderOverviewPanel(ovHost, {
+      usageRange: '7d',
+      onChangeUsageRange: () => {},
+      selectedConvo: { id: 'c-ov-1', title: 'Steps Sync', status: 'RUNNING', stepCount: 657 },
+      snapshot: { cascadeId: 'c-ov-1', status: 'RUNNING', steps: Array.from({ length: 200 }, (_, i) => ({ idx: i })) },
+      overview: {
+        todayUsage: { totalTokens: 1000, requests: 2, cacheRead: 700, uncached: 200, output: 100 },
+        usageDays: [
+          { date: '2026-11-26', totalTokens: 0, requests: 0, cacheRead: 0, uncached: 0, output: 0 },
+          { date: '2026-11-27', totalTokens: 400, requests: 1, cacheRead: 250, uncached: 100, output: 50 },
+          { date: '2026-11-28', totalTokens: 1000, requests: 2, cacheRead: 700, uncached: 200, output: 100 },
+        ],
+        projects: [
+          { id: 'p-1', name: 'MAGA', shortPath: '~/Developer/MAGA', isGitRepo: true, worktrees: [{ branch: 'main', isMain: true }] },
+        ],
+        worktreeByCid: {},
+      },
+    });
+    assert.equal(ovHost.querySelectorAll('.rc-ov-legend-dot').length, 3);
+    assert.equal(ovHost.querySelectorAll('.rc-usage-col-track .rc-usage-col-bar').length, 2);
+    assert.equal(ovHost.querySelectorAll('.rc-usage-col-zero').length, 1);
+    assert.ok(ovHost.querySelector('.rc-usage-grid .rc-usage-max-tick'));
+    assert.ok(ovHost.textContent.includes('657 步'), 'Overview active session must reflect real total stepCount');
+    assert.equal(ovHost.textContent.includes('main (main)'), false, 'main branch must deduplicate main (main)');
+    const dayCols = ovHost.querySelectorAll('.rc-usage-col');
+    dayCols[1].dispatchEvent(new dom.window.Event('focus'));
+    assert.match(ovHost.querySelector('.rc-ov-kpi')?.textContent || '', /^400 tok$/);
+    ovHost.querySelector('.rc-usage-chart').dispatchEvent(new dom.window.Event('pointerleave'));
+    assert.match(ovHost.querySelector('.rc-ov-kpi')?.textContent || '', /^1\.4k tok$/);
+
+    // 5. Composer bar omits duplicate desktop 回到底部 button
+    const composerSrc = fs.readFileSync(path.join(PWA_DIR, 'src', 'composer-bar.mjs'), 'utf8');
+    assert.equal(composerSrc.includes('回到底部'), false);
+
+    // 5b. UI helper el() binds onKeydown cleanly without inline on* attributes
+    let kCount = 0;
+    const keyNode = uiHelpersMod.el('div', {
+      onKeydown: () => { kCount += 1; },
+      onclick: 'alert(1)',
+    });
+    assert.equal(keyNode.getAttribute('onkeydown'), null);
+    assert.equal(keyNode.getAttribute('onclick'), null);
+    keyNode.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter' }));
+    assert.equal(kCount, 1);
+
+    // 6. Viewer drawer: unique repoName fallback, ambiguous repoName safety, cleaned worktree projectId, explicit repo switch, & gitError safety
+    const viewerMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'viewer-drawer.mjs')).href);
+    const scopeBaseState = {
+      selectedId: 'cid-cleaned',
+      selectedProjectId: '',
+      viewer: viewerMod.createInitialViewerState(),
+      studioOverview: {
+        projects: [
+          { id: 'proj-unique', name: 'UniqueRepo' },
+          { id: 'proj-dup-1', name: 'SharedName' },
+          { id: 'proj-dup-2', name: 'SharedName' },
+        ],
+        worktreeByCid: {
+          'cid-cleaned': { branch: '', repoName: 'UniqueRepo', projectId: 'proj-unique' },
+          'cid-ambig': { branch: '', repoName: 'SharedName', projectId: '' },
+        },
+      },
+    };
+    const cleanedScope = viewerMod.resolveGitScopeFromState(scopeBaseState, { cascadeId: 'cid-cleaned' });
+    assert.equal(cleanedScope.projectId, 'proj-unique');
+    assert.equal(cleanedScope.cascadeId, '');
+
+    const ambigScope = viewerMod.resolveGitScopeFromState(
+      { ...scopeBaseState, selectedId: 'cid-ambig' },
+      { cascadeId: 'cid-ambig' }
+    );
+    assert.equal(ambigScope.projectId, '');
+
+    const explicitSwitchScope = viewerMod.resolveGitScopeFromState(
+      { ...scopeBaseState, viewer: { ...scopeBaseState.viewer, open: true, cascadeId: 'cid-cleaned' } },
+      { projectId: 'proj-dup-2', cascadeId: '' }
+    );
+    assert.equal(explicitSwitchScope.projectId, 'proj-dup-2');
+    assert.equal(explicitSwitchScope.cascadeId, '');
+
+    const commitDrillScope = viewerMod.resolveGitScopeFromState({
+      ...scopeBaseState,
+      viewer: { ...scopeBaseState.viewer, open: true, projectId: 'proj-dup-2', cascadeId: '' },
+    });
+    assert.equal(commitDrillScope.projectId, 'proj-dup-2');
+    assert.equal(commitDrillScope.cascadeId, '');
+
+    const drawerHost = doc.createElement('div');
+    viewerMod.renderViewerDrawer(drawerHost, {
+      viewer: {
+        ...viewerMod.createInitialViewerState(),
+        open: true,
+        tab: 'git',
+        gitError: '该项目目录未在桌面端授权列表中',
+        gitStatus: { branch: 'stale-branch', dirtyCount: 1, dirtyFiles: [{ path: 'stale.txt', status: 'M' }] },
+      },
+      projects: [{ id: 'proj-unique', name: 'UniqueRepo', shortPath: '~/UniqueRepo' }],
+    });
+    assert.ok(drawerHost.querySelector('.rc-error-banner'));
+    assert.equal(drawerHost.textContent.includes('stale.txt'), false, 'gitError must not render stale gitStatus');
+
+    const switcherHost = doc.createElement('div');
+    let diffWrapToggles = 0;
+    viewerMod.renderViewerDrawer(switcherHost, {
+      viewer: {
+        ...viewerMod.createInitialViewerState(),
+        open: true,
+        tab: 'git',
+        projectId: 'proj-unique',
+        diffTarget: { filePath: 'a.mjs', commitHash: '' },
+        diffWrap: true,
+        diffResult: { diff: '@@ -10,2 +10,3 @@\n-const a = 1;\n+const a = 2;\n+const b = 3;' },
+        gitStatus: { branch: 'main', dirtyCount: 0, dirtyFiles: [], recentCommits: [], repoName: 'UniqueRepo', shortPath: '~/UniqueRepo' },
+      },
+      projects: [
+        { id: 'proj-unique', name: 'UniqueRepo', shortPath: '~/UniqueRepo' },
+        { id: 'proj-dup-1', name: 'SharedName', shortPath: '~/SharedName' },
+      ],
+      onSelectProjectGit: () => {},
+      onToggleDiffWrap: () => { diffWrapToggles += 1; },
+    });
+    assert.equal(switcherHost.querySelectorAll('select.rc-viewer-proj-select option').length, 2);
+    assert.equal(switcherHost.querySelector('.rc-viewer-repo-head > strong'), null, 'dedup repo strong when switcher select is visible');
+    assert.ok(switcherHost.querySelectorAll('.rc-diff-ln').length >= 4);
+    assert.equal(switcherHost.querySelector('.rc-diff-code')?.getAttribute('data-wrap'), 'true');
+    switcherHost.querySelector('.rc-diff-wrap-btn')?.click();
+    assert.equal(diffWrapToggles, 1);
+
+    // 7. Timeline view: invisible failed step error bridging, concise single-line error group, live running row, Chinese labels & empty !cid shortcut card
+    const timelineMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'timeline-view.mjs')).href);
+    const tlHost = doc.createElement('div');
+    const tlTitle = doc.createElement('h2');
+    const tlSub = doc.createElement('div');
+    timelineMod.renderDetailTimeline({
+      state: { selectedId: null, conversations: [], snapshots: new Map(), streams: new Map() },
+      refs: { timeline: tlHost, detailTitle: tlTitle, detailSub: tlSub },
+    });
+    assert.ok(tlHost.querySelector('.rc-empty-card'));
+    assert.equal(tlHost.querySelectorAll('.rc-empty-shortcuts .rc-kbd').length, 3);
+
+    const groupedCid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee9';
+    timelineMod.renderDetailTimeline({
+      state: {
+        selectedId: groupedCid,
+        identity: { role: 'observe' },
+        conversations: [{ id: groupedCid, title: 'Error Group Test', status: 'RUNNING' }],
+        snapshots: new Map([
+          [
+            groupedCid,
+            {
+              status: 'RUNNING',
+              steps: [
+                { idx: 1, type: 'ERROR_MESSAGE', status: 'DONE', text: 'API error (attempt 1): Post "https://example.com": EOF' },
+                { idx: 2, type: 'PLANNER_RESPONSE', status: 'ERROR', text: '', toolCalls: [] },
+                { idx: 3, type: 'ERROR_MESSAGE', status: 'DONE', text: 'API error (attempt 2): stream reading error: unexpected EOF' },
+                { idx: 4, type: 'GENERIC', status: 'DONE', toolCalls: [{ name: 'mcpTool', args: '{}' }] },
+                { idx: 5, type: 'GENERIC', status: 'DONE', toolCalls: [{ name: 'exit_plan_mode', args: '{}' }] },
+                { idx: 6, type: 'USER_INPUT', status: 'DONE', text: 'retry' },
+                { idx: 7, type: 'ERROR_MESSAGE', status: 'ERROR', text: '' },
+              ],
+            },
+          ],
+        ]),
+        streams: new Map(),
+      },
+      refs: { timeline: tlHost, detailTitle: tlTitle, detailSub: tlSub },
+    });
+    const errGroups = tlHost.querySelectorAll('details.rc-error-group');
+    assert.equal(errGroups.length, 2);
+    assert.match(errGroups[0].querySelector('.rc-error-group-sum')?.textContent || '', /×2.*unexpected EOF/);
+    const emptyErrSum = errGroups[1].querySelector('.rc-error-group-sum')?.textContent || '';
+    assert.equal(emptyErrSum.includes('错误 #7'), false);
+    assert.match(emptyErrSum, /详情不可用（#7）/);
+    assert.equal(emptyErrSum.includes('瞬时'), false);
+    assert.ok(tlHost.querySelector('.rc-live-status-row'));
+    const actText = tlHost.querySelector('.rc-activity-summary')?.textContent || '';
+    assert.match(actText, /外部工具/);
+    assert.match(actText, /规划/);
+
+    // 8. Sidebar view: top project dropdown + sticky collapsible project groups + 5-item cap + 步 unit
+    const sidebarMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'sidebar-view.mjs')).href);
+    const sbRefs = {
+      filterRow: doc.createElement('div'),
+      groupRow: doc.createElement('div'),
+      projFilterRow: doc.createElement('div'),
+      sidebarList: doc.createElement('div'),
+      navApprovalsBadge: doc.createElement('span'),
+    };
+    const manyConvos = Array.from({ length: 7 }, (_, i) => ({
+      id: `bbbbbbbb-bbbb-4bbb-8bbb-00000000000${i}`,
+      title: `Chat ${i}`,
+      status: i === 0 ? 'RUNNING' : 'IDLE',
+      stepCount: 10 + i,
+      projectId: 'p-1',
+    }));
+    const sbState = {
+      filter: 'all',
+      sidebarGroupBy: 'project',
+      includeSubagents: false,
+      searchQuery: '',
+      selectedProjectId: '',
+      selectedId: manyConvos[0].id,
+      conversations: manyConvos,
+      collapsedProjects: new Set(),
+      expandedProjectGroups: new Set(),
+      studioOverview: {
+        projects: [{ id: 'p-1', name: 'MAGA', isGitRepo: true }],
+        worktreeByCid: {},
+      },
+    };
+    let toggledProjKey = '';
+    sidebarMod.renderFilterChipsView({ state: sbState, refs: sbRefs });
+    assert.equal(sbRefs.projFilterRow.querySelectorAll('select.rc-sidebar-proj-select option').length, 2);
+    sidebarMod.renderSidebarListView({
+      state: sbState,
+      refs: sbRefs,
+      resolvedLayoutMode: 'desktop',
+      onToggleCollapseProject: (k) => { toggledProjKey = k; },
+    });
+    assert.equal(sbRefs.sidebarList.querySelectorAll('.rc-convo-item').length, 5);
+    assert.match(sbRefs.sidebarList.querySelector('.rc-proj-more-btn')?.textContent || '', /展开其余 2 条会话/);
+    assert.match(sbRefs.sidebarList.textContent, /10 步/);
+    sbRefs.sidebarList.querySelector('.rc-proj-group-head')?.click();
+    assert.equal(toggledProjKey, 'p-1');
+  } finally {
+    if (prevDoc) Object.defineProperty(globalThis, 'document', prevDoc);
+    else delete globalThis.document;
+    if (prevWin) Object.defineProperty(globalThis, 'window', prevWin);
+    else delete globalThis.window;
+    dom.window.close();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });

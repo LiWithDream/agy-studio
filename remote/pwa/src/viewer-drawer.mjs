@@ -28,30 +28,48 @@ function statusBadgeTone(status) {
   return 'warn';
 }
 
-export function renderUnifiedDiffDom(diffText) {
-  const wrap = el('div', { className: 'rc-diff-code' });
+export function renderUnifiedDiffDom(diffText, { wrap = false } = {}) {
+  const wrapEl = el('div', { className: 'rc-diff-code', 'data-wrap': wrap ? 'true' : 'false' });
   const text = String(diffText || '');
   if (!text.trim()) {
-    wrap.appendChild(el('div', { className: 'rc-empty', text: '无文本差异（可能是空变更或二进制文件）。' }));
-    return wrap;
+    wrapEl.appendChild(el('div', { className: 'rc-empty', text: '无文本差异（可能是空变更或二进制文件）。' }));
+    return wrapEl;
   }
   const lines = text.split('\n');
+  let oldLn = 0;
+  let newLn = 0;
   for (let idx = 0; idx < lines.length; idx++) {
     const line = lines[idx];
     let kind = 'ctx';
-    if (line.startsWith('@@')) kind = 'hunk';
-    else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git') || line.startsWith('index ')) kind = 'meta';
-    else if (line.startsWith('+')) kind = 'add';
-    else if (line.startsWith('-')) kind = 'del';
-    wrap.appendChild(
+    let lnText = '';
+    const hunkMatch = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
+    if (hunkMatch) {
+      kind = 'hunk';
+      oldLn = Number(hunkMatch[1]);
+      newLn = Number(hunkMatch[2]);
+      lnText = '··';
+    } else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git') || line.startsWith('index ')) {
+      kind = 'meta';
+    } else if (line.startsWith('+')) {
+      kind = 'add';
+      lnText = newLn > 0 ? String(newLn++) : '';
+    } else if (line.startsWith('-')) {
+      kind = 'del';
+      lnText = oldLn > 0 ? String(oldLn++) : '';
+    } else {
+      if (oldLn > 0) oldLn++;
+      if (newLn > 0) lnText = String(newLn++);
+    }
+    wrapEl.appendChild(
       el(
         'div',
         { className: `rc-diff-line is-${kind}` },
+        el('span', { className: 'rc-diff-ln', text: lnText }),
         el('span', { className: 'rc-diff-text', text: line || ' ' })
       )
     );
   }
-  return wrap;
+  return wrapEl;
 }
 
 function renderArtifactsTab(viewer, { canWrite, online, onSelectArtifact, onRefreshArtifacts, onQuickReply }) {
@@ -158,26 +176,57 @@ function renderArtifactsTab(viewer, { canWrite, online, onSelectArtifact, onRefr
 
 function renderGitTab(
   viewer,
-  { onRefreshGit, onSelectDirtyFile, onSelectCommit, onSelectCommitFile, onBackToGitList }
+  { projects = [], onRefreshGit, onSelectProjectGit, onSelectDirtyFile, onSelectCommit, onSelectCommitFile, onBackToGitList, onToggleDiffWrap }
 ) {
   const body = el('div', { className: 'rc-viewer-body' });
   if (viewer.gitLoading) {
     body.appendChild(el('div', { className: 'rc-empty', text: '正在读取仓库 Git 状态…' }));
     return body;
   }
+  const buildProjectPicker = () =>
+    Array.isArray(projects) && projects.length > 0 && onSelectProjectGit
+      ? el(
+          'div',
+          { className: 'rc-viewer-file-list' },
+          ...projects.map((p) =>
+            el(
+              'button',
+              {
+                type: 'button',
+                className: 'rc-viewer-file-row',
+                onClick: () => onSelectProjectGit(p.id),
+              },
+              el('span', { className: 'rc-pill', 'data-tone': 'info', text: 'Git' }),
+              el('span', { className: 'rc-viewer-file-path', text: p.name || p.shortPath || p.id }),
+              p.shortPath ? el('span', { className: 'rc-viewer-file-stat', text: p.shortPath }) : null
+            )
+          )
+        )
+      : null;
+
   if (viewer.gitError) {
     body.appendChild(el('div', { className: 'rc-error-banner', text: viewer.gitError }));
+    const fallbackPicker = buildProjectPicker();
+    if (fallbackPicker) {
+      body.appendChild(el('div', { className: 'rc-convo-meta', text: '可选择其他已授权仓库查看 Git 变更：' }));
+      body.appendChild(fallbackPicker);
+    }
     return body;
   }
 
   const status = viewer.gitStatus;
   if (!status) {
+    const pickerList = buildProjectPicker();
     body.appendChild(
       el(
         'div',
         { className: 'rc-empty' },
-        el('div', { text: '当前会话未绑定本地 Git 仓库，可在概览页选择任意项目查看 Git 变更。' }),
-        el('button', {
+        el('div', {
+          text: pickerList
+            ? '当前会话未绑定特定 Git 分支，可直接选择下方项目查看变更：'
+            : '当前会话未绑定本地 Git 仓库，可在概览页选择任意项目查看 Git 变更。',
+        }),
+        pickerList ? null : el('button', {
           type: 'button',
           className: 'rc-btn is-sm',
           text: '重试读取',
@@ -185,6 +234,7 @@ function renderGitTab(
         })
       )
     );
+    if (pickerList) body.appendChild(pickerList);
     return body;
   }
 
@@ -207,6 +257,31 @@ function renderGitTab(
     repoPills.push(el('span', { className: 'rc-pill', 'data-tone': 'warn', text: `↓${status.behind}` }));
   }
 
+  const activeProjId = viewer.projectId || status.projectId || '';
+  const switcherSelect =
+    Array.isArray(projects) && projects.length > 1 && onSelectProjectGit
+      ? el(
+          'select',
+          {
+            className: 'rc-select rc-viewer-proj-select',
+            'aria-label': '切换仓库',
+            title: '切换查看其他项目仓库',
+            value: activeProjId,
+            onChange: (ev) => {
+              const nextPid = String(ev.target?.value || '');
+              if (nextPid) onSelectProjectGit(nextPid);
+            },
+          },
+          ...projects.map((p) =>
+            el('option', {
+              value: p.id,
+              text: p.name || p.shortPath || p.id,
+              ...(p.id === activeProjId ? { selected: 'selected' } : {}),
+            })
+          )
+        )
+      : null;
+
   body.appendChild(
     el(
       'div',
@@ -214,15 +289,20 @@ function renderGitTab(
       el(
         'div',
         { className: 'rc-viewer-repo-head' },
-        el('strong', { text: status.repoName || 'Git 仓库' }),
+        switcherSelect ? null : el('strong', { text: status.repoName || 'Git 仓库' }),
         status.shortPath ? el('span', { className: 'rc-mono rc-ov-muted', text: status.shortPath }) : null
       ),
-      el('button', {
-        type: 'button',
-        className: 'rc-btn is-sm',
-        text: '刷新',
-        onClick: () => onRefreshGit?.(),
-      })
+      el(
+        'div',
+        { className: 'rc-dock-group' },
+        switcherSelect,
+        el('button', {
+          type: 'button',
+          className: 'rc-btn is-sm',
+          text: '刷新',
+          onClick: () => onRefreshGit?.(),
+        })
+      )
     )
   );
   body.appendChild(el('div', { className: 'rc-studio-pills' }, ...repoPills));
@@ -244,7 +324,16 @@ function renderGitTab(
           text: viewer.diffTarget.commitHash
             ? `${viewer.diffTarget.commitHash.slice(0, 7)} · ${viewer.diffTarget.filePath}`
             : viewer.diffTarget.filePath,
-        })
+        }),
+        onToggleDiffWrap
+          ? el('button', {
+              type: 'button',
+              className: 'rc-btn is-sm rc-diff-wrap-btn',
+              'aria-pressed': viewer.diffWrap ? 'true' : 'false',
+              text: '自动换行',
+              onClick: () => onToggleDiffWrap(),
+            })
+          : null
       )
     );
     if (viewer.diffLoading) {
@@ -260,7 +349,7 @@ function renderGitTab(
         el('div', { className: 'rc-viewer-warn', text: 'Diff 超过 64 KB 上限，已截断显示。' })
       );
     }
-    body.appendChild(renderUnifiedDiffDom(viewer.diffResult?.diff || ''));
+    body.appendChild(renderUnifiedDiffDom(viewer.diffResult?.diff || '', { wrap: Boolean(viewer.diffWrap) }));
     return body;
   }
 
@@ -383,6 +472,7 @@ export function renderViewerDrawer(
   container,
   {
     viewer,
+    projects = [],
     canWrite = false,
     online = false,
     onSwitchTab = null,
@@ -391,10 +481,12 @@ export function renderViewerDrawer(
     onRefreshArtifacts = null,
     onQuickReply = null,
     onRefreshGit = null,
+    onSelectProjectGit = null,
     onSelectDirtyFile = null,
     onSelectCommit = null,
     onSelectCommitFile = null,
     onBackToGitList = null,
+    onToggleDiffWrap = null,
   } = {}
 ) {
   if (!container) return;
@@ -446,11 +538,14 @@ export function renderViewerDrawer(
     ),
     tab === 'git'
       ? renderGitTab(viewer, {
+          projects,
           onRefreshGit,
+          onSelectProjectGit,
           onSelectDirtyFile,
           onSelectCommit,
           onSelectCommitFile,
           onBackToGitList,
+          onToggleDiffWrap,
         })
       : renderArtifactsTab(viewer, {
           canWrite,
@@ -496,7 +591,32 @@ export function createInitialViewerState() {
     diffResult: null,
     diffLoading: false,
     diffError: '',
+    diffWrap: false,
   };
+}
+
+export function resolveGitScopeFromState(state, opts = {}) {
+  const hasExplicitCid = Boolean(opts && Object.prototype.hasOwnProperty.call(opts, 'cascadeId'));
+  const explicitPid = String(opts?.projectId || '');
+  const viewerCid = String(state?.viewer?.cascadeId || '');
+  const fallbackCid =
+    state?.viewer?.open && state?.viewer?.projectId ? viewerCid : viewerCid || state?.selectedId || '';
+  const cid = hasExplicitCid ? String(opts.cascadeId || '') : explicitPid ? '' : fallbackCid;
+  const wtMeta = cid ? state?.studioOverview?.worktreeByCid?.[cid] : null;
+  const projects = Array.isArray(state?.studioOverview?.projects) ? state.studioOverview.projects : [];
+  let matchedUnique = '';
+  if (!wtMeta?.projectId && wtMeta?.repoName) {
+    const byName = projects.filter((p) => p && p.name === wtMeta.repoName);
+    if (byName.length === 1) {
+      matchedUnique = byName[0].id || '';
+    }
+  }
+  const pid =
+    explicitPid || state?.viewer?.projectId || wtMeta?.projectId || matchedUnique || state?.selectedProjectId || '';
+  // When bound worktree was cleaned (branch cleared by studio-bridge) and repo projectId is known,
+  // query by projectId directly so stale deleted worktree paths never block repo Git inspection.
+  const effectiveCid = wtMeta && !wtMeta.branch && pid ? '' : cid;
+  return { projectId: pid, cascadeId: effectiveCid, hasWorktreeMeta: Boolean(wtMeta) };
 }
 
 export function createViewerController({
@@ -515,6 +635,7 @@ export function createViewerController({
     if (!host) return;
     renderViewerDrawer(host, {
       viewer: state.viewer,
+      projects: Array.isArray(state.studioOverview?.projects) ? state.studioOverview.projects : [],
       canWrite: Boolean(canSteer?.()),
       online: Boolean(state.hostAttached && state.wsStatus === 'connected'),
       onSwitchTab: (nextTab) => {
@@ -522,8 +643,9 @@ export function createViewerController({
         if (nextTab === 'artifacts') {
           loadArtifacts(state.viewer.cascadeId || state.selectedId || '');
         } else {
+          const fallbackCid = state.viewer.projectId ? '' : state.selectedId || '';
           loadGitStatus({
-            cascadeId: state.viewer.cascadeId || state.selectedId || '',
+            cascadeId: state.viewer.cascadeId || fallbackCid,
             projectId: state.viewer.projectId || state.selectedProjectId || '',
           });
         }
@@ -541,10 +663,14 @@ export function createViewerController({
         onInsertQuickReply?.(text);
       },
       onRefreshGit: () => {
+        const fallbackCid = state.viewer.projectId ? '' : state.selectedId || '';
         loadGitStatus({
-          cascadeId: state.viewer.cascadeId || state.selectedId || '',
+          cascadeId: state.viewer.cascadeId || fallbackCid,
           projectId: state.viewer.projectId || state.selectedProjectId || '',
         });
+      },
+      onSelectProjectGit: (projectId) => {
+        loadGitStatus({ projectId, cascadeId: '' });
       },
       onSelectDirtyFile: (filePath) => {
         loadGitDiff({ filePath });
@@ -566,6 +692,10 @@ export function createViewerController({
           state.viewer.commitFiles = [];
           state.viewer.commitFilesError = '';
         }
+        render();
+      },
+      onToggleDiffWrap: () => {
+        state.viewer.diffWrap = !state.viewer.diffWrap;
         render();
       },
     });
@@ -639,11 +769,8 @@ export function createViewerController({
     }
   }
 
-  function resolveGitScope({ projectId = '', cascadeId = '' } = {}) {
-    const cid = cascadeId || state.viewer.cascadeId || state.selectedId || '';
-    const wtMeta = cid ? state.studioOverview?.worktreeByCid?.[cid] : null;
-    const pid = projectId || state.viewer.projectId || wtMeta?.projectId || state.selectedProjectId || '';
-    return { projectId: pid, cascadeId: cid };
+  function resolveGitScope(opts = {}) {
+    return resolveGitScopeFromState(state, opts);
   }
 
   async function loadGitStatus({ projectId = '', cascadeId = '' } = {}) {
@@ -657,7 +784,8 @@ export function createViewerController({
     state.viewer.diffTarget = null;
     state.viewer.diffResult = null;
     state.viewer.diffError = '';
-    if (!wsClient || (!scope.projectId && !scope.cascadeId)) {
+    const hasOverviewProjects = Array.isArray(state.studioOverview?.projects) && state.studioOverview.projects.length > 0;
+    if (!wsClient || (!scope.projectId && !scope.cascadeId) || (!scope.projectId && !scope.hasWorktreeMeta && hasOverviewProjects)) {
       state.viewer.gitStatus = null;
       state.viewer.gitLoading = false;
       state.viewer.gitError = '';
@@ -750,7 +878,7 @@ export function createViewerController({
     state.viewer.open = true;
     state.viewer.tab = 'git';
     state.viewer.projectId = projectId || '';
-    state.viewer.cascadeId = cascadeId || state.selectedId || '';
+    state.viewer.cascadeId = cascadeId || (projectId ? '' : state.selectedId || '');
     if (!wasOpen) onEnterModal?.();
     loadGitStatus({ projectId: state.viewer.projectId, cascadeId: state.viewer.cascadeId });
   }

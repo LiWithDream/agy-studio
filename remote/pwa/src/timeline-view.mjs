@@ -341,10 +341,11 @@ const SILENT_RESUME_SENTINEL = '\u2063\u200B\u2063';
 
 const TOOL_CATEGORY_LABELS = [
   [/^(?:read_file|view_file|viewFile|view_file_outline|view_code_item|read_resource)$/i, '读取'],
-  [/^(?:edit_file|write_file|write_to_file|replace_file_content|multi_replace_file_content)$/i, '编辑'],
+  [/^(?:edit_file|write_file|write_to_file|replace_file_content|multi_replace_file_content|codeAction)$/i, '代码编辑'],
   [/^(?:run_command|runCommand|command_status|send_command_input|manage_task)$/i, '命令'],
   [/^(?:grep|grep_search|find_by_name|list_dir|list_resources)$/i, '搜索'],
-  [/^(?:search_web|read_url_content|search_marketplace)$/i, '联网'],
+  [/^(?:search_web|read_url_content|search_marketplace|mcpTool|call_mcp_tool)$/i, '外部工具'],
+  [/^(?:enter_plan_mode|exit_plan_mode)$/i, '规划'],
   [/^(?:update_steps|update_focus)$/i, '进度'],
   [/^(?:read_board|post_message|swarm|swarm_wait|invoke_subagent|send_message)$/i, '协作'],
 ];
@@ -412,6 +413,19 @@ function isActivityStep(step) {
   if (t === 'PLANNER_RESPONSE' || t === '15') {
     const hasVisibleText = Boolean(String(step?.text || '').trim());
     return !hasVisibleText && !step?.error;
+  }
+  return false;
+}
+
+function isVisibleActivityStep(step, hideThinkingProse = true) {
+  if (!step || !isActivityStep(step)) return false;
+  if (Array.isArray(step.toolCalls) && step.toolCalls.length > 0) return true;
+  const t = String(step.type || '');
+  if ((t === 'TOOL_CALL' || t === 'GENERIC' || t === '132') && String(step.text || '').trim()) {
+    return true;
+  }
+  if (!hideThinkingProse && String(step.thinking || '').trim()) {
+    return true;
   }
   return false;
 }
@@ -550,11 +564,20 @@ export function renderStepCard(step, { hideThinkingProse = false, compact = fals
   }
 
   const isDoneStep = statusInfo.label === 'DONE';
+  const hasVisibleErrorBody = Boolean(
+    String(step.text || '').trim() ||
+      step.error ||
+      (step.thinking && !hideThinkingProse) ||
+      (Array.isArray(step.toolCalls) && step.toolCalls.length > 0) ||
+      step.mediaCount > 0
+  );
+  const isCompactEmptyError = compact && roleAttr === 'error' && !hasVisibleErrorBody;
   const card = el('article', {
     className: 'rc-step',
     'data-type': typeStr,
     'data-role': roleAttr,
     ...(compact ? { 'data-compact': 'true' } : {}),
+    ...(isCompactEmptyError ? { 'data-empty': 'true' } : {}),
   });
 
   const useCompactChatBubble = compact && (roleAttr === 'user' || roleAttr === 'assistant');
@@ -916,6 +939,110 @@ export function renderWaitingCards(
   });
 }
 
+function isErrorStep(step) {
+  const t = String(step?.type || '');
+  return t === 'ERROR_MESSAGE' || t === '17';
+}
+
+function extractErrorStepText(step) {
+  if (!step || typeof step !== 'object') return '';
+  const direct = String(step.text || '').trim();
+  if (direct) return direct;
+  const e = step.error;
+  if (!e) return '';
+  if (typeof e === 'string') return e.trim();
+  return String(
+    e.userErrorMessage || e.shortError || e.fullError || e.message || JSON.stringify(e, null, 2) || ''
+  ).trim();
+}
+
+function summarizeErrorReason(rawText) {
+  const s = String(rawText || '').trim();
+  if (!s) return { summary: '', attempt: '' };
+  const firstLine = s.split(/\r?\n/).find((l) => l.trim())?.trim() || s;
+  const attMatch = /\battempt\s+(\d+)\b/i.exec(firstLine);
+  const attempt = attMatch ? `第 ${attMatch[1]} 次` : '';
+  let clean = firstLine
+    .replace(/^API error(?:\s*\(attempt\s+\d+\))?\s*:\s*/i, '')
+    .replace(/Post\s+"https?:\/\/[^"]+"\s*:\s*/i, '')
+    .replace(/request failed\s*:\s*/i, '')
+    .trim();
+  if (!clean) clean = firstLine;
+  if (clean.length > 68) clean = `${clean.slice(0, 67)}…`;
+  return { summary: clean, attempt };
+}
+
+function renderErrorGroup(errBatch) {
+  const count = errBatch.length;
+  const latest = errBatch[count - 1] || {};
+  const first = errBatch[0] || {};
+  const latestRaw = extractErrorStepText(latest) || errBatch.map(extractErrorStepText).find(Boolean) || '';
+  const { summary, attempt } = summarizeErrorReason(latestRaw);
+  const firstIdx = first?.idx;
+  const lastIdx = latest?.idx;
+  const idxSpan =
+    firstIdx != null
+      ? lastIdx != null && lastIdx !== firstIdx
+        ? `#${firstIdx}–${lastIdx}`
+        : `#${firstIdx}`
+      : '';
+  const tFirst = formatTime(first.createdAt);
+  const tLast = formatTime(latest.createdAt);
+  const timeSpan =
+    tFirst && tLast && tFirst !== tLast
+      ? `${tFirst}–${tLast.slice(-2)}`
+      : tLast || tFirst || '';
+
+  const fallbackSummary = idxSpan ? `详情不可用（${idxSpan}）` : '详情不可用';
+  const headlineSummary = summary || fallbackSummary;
+  const headline =
+    count > 1
+      ? `⚠ API 错误 ×${count} · ${headlineSummary}`
+      : `⚠ API 错误 · ${headlineSummary}`;
+
+  const body = el('div', { className: 'rc-error-group-body' });
+  for (const s of errBatch) {
+    const idxStr = s?.idx ?? '?';
+    const ts = formatTime(s?.createdAt);
+    const raw = extractErrorStepText(s) || '（错误详情未记录，无可用堆栈或消息文本）';
+    body.appendChild(
+      el(
+        'div',
+        { className: 'rc-error-entry' },
+        el(
+          'div',
+          { className: 'rc-error-entry-meta' },
+          el('span', { text: `#${idxStr}` }),
+          ts ? el('span', { text: ts }) : null
+        ),
+        el('pre', { className: 'rc-pre', text: raw })
+      )
+    );
+  }
+
+  return el(
+    'details',
+    { className: 'rc-error-group' },
+    el(
+      'summary',
+      { className: 'rc-error-group-sum' },
+      el(
+        'span',
+        { className: 'rc-error-sum-main' },
+        el('span', { className: 'rc-error-sum-text', text: headline }),
+        attempt ? el('span', { className: 'rc-pill rc-error-attempt', 'data-tone': 'danger', text: attempt }) : null
+      ),
+      el(
+        'span',
+        { className: 'rc-error-sum-meta' },
+        timeSpan ? el('span', { className: 'rc-error-sum-time', text: timeSpan }) : null,
+        el('span', { className: 'rc-error-chevron', text: '▸' })
+      )
+    ),
+    body
+  );
+}
+
 export function renderDetailTimeline({
   state,
   refs,
@@ -939,7 +1066,19 @@ export function renderDetailTimeline({
     clearNode(refs.detailSub);
     clearNode(refs.timeline);
     refs.timeline.appendChild(
-      el('div', { className: 'rc-empty', text: '从左侧选择一个会话以查看消息时间线、工具调用与实时流。' })
+      el(
+        'div',
+        { className: 'rc-empty rc-empty-card' },
+        el('div', { className: 'rc-empty-title', text: 'AGY Studio Remote 工作台' }),
+        el('div', { text: '从左侧选择一个会话以查看消息时间线、工具调用与实时流。' }),
+        el(
+          'div',
+          { className: 'rc-empty-shortcuts rc-desktop-only' },
+          el('span', { className: 'rc-kbd-hint' }, el('kbd', { className: 'rc-kbd', text: '⌘K' }), '搜索会话'),
+          el('span', { className: 'rc-kbd-hint' }, el('kbd', { className: 'rc-kbd', text: '⌘B' }), '切换侧栏'),
+          el('span', { className: 'rc-kbd-hint' }, el('kbd', { className: 'rc-kbd', text: '⌘.' }), '切换概览')
+        )
+      )
     );
     return;
   }
@@ -951,7 +1090,7 @@ export function renderDetailTimeline({
   appendNodes(
     refs.detailSub,
     el('span', { className: 'rc-pill', 'data-tone': runInfo.tone, text: runInfo.label }),
-    el('span', { className: 'rc-mono rc-desktop-only', text: cid.slice(0, 13) }),
+    el('span', { className: 'rc-mono rc-detail-cid', text: cid.slice(0, 13) }),
     wtMeta?.branch
       ? onOpenGitDiff
         ? el('button', {
@@ -964,7 +1103,7 @@ export function renderDetailTimeline({
           })
         : el('span', { className: 'rc-pill rc-branch-pill', 'data-tone': 'info', text: `⎇ ${wtMeta.branch}` })
       : null,
-    snap?.source ? el('span', { className: 'rc-desktop-only', text: `来源: ${snap.source}` }) : null
+    snap?.source ? el('span', { className: 'rc-detail-source', text: `来源: ${snap.source}` }) : null
   );
 
   const wasNearBottom =
@@ -1005,11 +1144,17 @@ export function renderDetailTimeline({
     refs.timeline.appendChild(el('div', { className: 'rc-empty', text: '该会话暂无可显示步骤。' }));
   } else {
     let activityBatch = [];
+    let errorBatch = [];
     const flushActivity = () => {
       if (activityBatch.length === 0) return;
       const groupEl = renderActivityGroup(activityBatch, { hideThinkingProse });
       if (groupEl) refs.timeline.appendChild(groupEl);
       activityBatch = [];
+    };
+    const flushErrors = () => {
+      if (errorBatch.length === 0) return;
+      refs.timeline.appendChild(renderErrorGroup(errorBatch, { hideThinkingProse, compact: true, onOpenArtifact }));
+      errorBatch = [];
     };
 
     for (const step of steps) {
@@ -1018,30 +1163,48 @@ export function renderDetailTimeline({
         continue;
       }
       if (isActivityStep(step)) {
+        if (!isVisibleActivityStep(step, hideThinkingProse)) {
+          continue;
+        }
+        flushErrors();
         activityBatch.push(step);
         continue;
       }
+      if (isErrorStep(step)) {
+        flushActivity();
+        errorBatch.push(step);
+        continue;
+      }
       flushActivity();
+      flushErrors();
       refs.timeline.appendChild(renderStepCard(step, { hideThinkingProse, compact: true, onOpenArtifact }));
     }
     flushActivity();
+    flushErrors();
   }
 
   const streamStatusActive =
     typeof streamEntry === 'object' && streamEntry ? isRunningStatus(streamEntry.status) : false;
   const isLiveRunning = isRunningStatus(snap?.status ?? convo?.status) || streamStatusActive;
   let lastPlannerText = '';
+  let lastToolCategory = '';
   for (let i = steps.length - 1; i >= 0; i--) {
-    if (steps[i]?.type === 'PLANNER_RESPONSE' || steps[i]?.type === '15') {
-      lastPlannerText = String(steps[i].text || '').trim();
-      break;
+    const s = steps[i];
+    if (!lastPlannerText && (s?.type === 'PLANNER_RESPONSE' || s?.type === '15')) {
+      lastPlannerText = String(s.text || '').trim();
     }
+    if (!lastToolCategory && Array.isArray(s?.toolCalls) && s.toolCalls.length > 0) {
+      const tc = s.toolCalls[s.toolCalls.length - 1];
+      lastToolCategory = humanizeToolCategory(tc?.name || tc?.toolName);
+    }
+    if (lastPlannerText && lastToolCategory) break;
   }
   const duplicatesLastStep =
     Boolean(streamText) && Boolean(lastPlannerText) && String(streamText).trim() === lastPlannerText;
   const visibleStreamThinking = hideThinkingProse ? '' : streamThinking;
 
-  if (isLiveRunning && (streamText || visibleStreamThinking) && !duplicatesLastStep) {
+  const hasLiveStreamCard = Boolean(isLiveRunning && (streamText || visibleStreamThinking) && !duplicatesLastStep);
+  if (hasLiveStreamCard) {
     refs.timeline.appendChild(
       el(
         'div',
@@ -1061,6 +1224,18 @@ export function renderDetailTimeline({
             )
           : null,
         streamText ? renderSafeMarkdown(String(streamText)) : null
+      )
+    );
+  } else if (isLiveRunning && waiting.length === 0) {
+    refs.timeline.appendChild(
+      el(
+        'div',
+        { className: 'rc-live-status-row' },
+        el('span', { className: 'rc-pulse' }),
+        el('span', {
+          className: 'rc-live-status-text',
+          text: lastToolCategory ? `正在执行中 · ${lastToolCategory}…` : '正在执行中，等待宿主返回步骤…',
+        })
       )
     );
   }

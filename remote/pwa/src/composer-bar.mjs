@@ -1006,16 +1006,5 @@ export function renderComposerFooterBar(
     }
   }
 
-  if (hasSelection) {
-    rightCluster.appendChild(
-      el('button', {
-        type: 'button',
-        className: 'rc-btn is-sm rc-desktop-only',
-        text: '回到底部',
-        onClick: () => onScrollBottom?.('bottom'),
-      })
-    );
-  }
-
   appendNodes(footer, leftCluster, rightCluster);
 }

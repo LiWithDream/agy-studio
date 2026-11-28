@@ -184,10 +184,14 @@ function renderUsageCard(todayUsage, { usageDays = [], usageRange = 'day', onCha
           },
           el(
             'div',
-            { className: 'rc-usage-col-bar', style: { height: `${heightPct}%` } },
-            el('div', { className: 'rc-usage-col-seg is-output', style: { height: `${tok > 0 ? oPct : 0}%` } }),
-            el('div', { className: 'rc-usage-col-seg is-uncached', style: { height: `${tok > 0 ? uPct : 0}%` } }),
-            el('div', { className: 'rc-usage-col-seg is-cache', style: { height: `${tok > 0 ? cPct : 0}%` } })
+            { className: 'rc-usage-col-track' },
+            el(
+              'div',
+              { className: 'rc-usage-col-bar', style: { height: `${heightPct}%` } },
+              el('div', { className: 'rc-usage-col-seg is-output', style: { height: `${tok > 0 ? oPct : 0}%` } }),
+              el('div', { className: 'rc-usage-col-seg is-uncached', style: { height: `${tok > 0 ? uPct : 0}%` } }),
+              el('div', { className: 'rc-usage-col-seg is-cache', style: { height: `${tok > 0 ? cPct : 0}%` } })
+            )
           ),
           mode === '7d' ? el('span', { className: 'rc-usage-col-label', text: label }) : null
         )
@@ -225,9 +229,9 @@ function renderUsageCard(todayUsage, { usageDays = [], usageRange = 'day', onCha
     el(
       'div',
       { className: 'rc-ov-legend' },
-      el('span', { className: 'rc-ov-legend-item', text: `缓存读 ${formatCompactTokens(cacheRead)}` }),
-      el('span', { className: 'rc-ov-legend-item', text: `未缓存 ${formatCompactTokens(uncached)}` }),
-      el('span', { className: 'rc-ov-legend-item', text: `输出 ${formatCompactTokens(output)}` })
+      el('span', { className: 'rc-ov-legend-item' }, el('span', { className: 'rc-ov-legend-dot is-cache' }), `缓存读 ${formatCompactTokens(cacheRead)}`),
+      el('span', { className: 'rc-ov-legend-item' }, el('span', { className: 'rc-ov-legend-dot is-uncached' }), `未缓存 ${formatCompactTokens(uncached)}`),
+      el('span', { className: 'rc-ov-legend-item' }, el('span', { className: 'rc-ov-legend-dot is-output' }), `输出 ${formatCompactTokens(output)}`)
     )
   );
 }
@@ -242,6 +246,7 @@ function renderActiveSessionCard({
   deviceName,
   role,
   onCopyId,
+  onOpenProjectGit = null,
 }) {
   const cid = selectedConvo?.id || snapshot?.cascadeId || '';
   if (!cid) {
@@ -302,6 +307,23 @@ function renderActiveSessionCard({
       : null
   );
 
+  const nameMatches =
+    !wtMeta?.projectId && wtMeta?.repoName && Array.isArray(overview?.projects)
+      ? overview.projects.filter((p) => p && p.name === wtMeta.repoName)
+      : [];
+  const matchedRepoId = wtMeta?.projectId || (nameMatches.length === 1 ? nameMatches[0].id || '' : '');
+  const repoNode = wtMeta?.repoName
+    ? onOpenProjectGit && matchedRepoId
+      ? el('button', {
+          type: 'button',
+          className: 'rc-ov-session-repo',
+          title: '查看该仓库 Git 状态与 Diff',
+          text: `仓库: ${wtMeta.repoName} · Git →`,
+          onClick: () => onOpenProjectGit({ projectId: matchedRepoId }),
+        })
+      : el('div', { className: 'rc-convo-meta', text: `仓库: ${wtMeta.repoName}` })
+    : null;
+
   return el(
     'section',
     { className: 'rc-ov-card' },
@@ -314,7 +336,7 @@ function renderActiveSessionCard({
     el('div', { className: 'rc-ov-session-title', text: selectedConvo?.title || selectedConvo?.summary || cid }),
     el('div', { className: 'rc-mono rc-ov-muted', text: cid.slice(0, 18) }),
     pills,
-    wtMeta?.repoName ? el('div', { className: 'rc-convo-meta', text: `仓库: ${wtMeta.repoName}` }) : null
+    repoNode
   );
 }
 
@@ -445,6 +467,7 @@ export function renderOverviewPanel(
       deviceName,
       role,
       onCopyId,
+      onOpenProjectGit,
     }),
     renderProjectsOverviewCard({ overview, selectedProjectId, onSelectProject, onOpenProjectGit })
   );

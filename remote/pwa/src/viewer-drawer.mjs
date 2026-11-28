@@ -158,26 +158,57 @@ function renderArtifactsTab(viewer, { canWrite, online, onSelectArtifact, onRefr
 
 function renderGitTab(
   viewer,
-  { onRefreshGit, onSelectDirtyFile, onSelectCommit, onSelectCommitFile, onBackToGitList }
+  { projects = [], onRefreshGit, onSelectProjectGit, onSelectDirtyFile, onSelectCommit, onSelectCommitFile, onBackToGitList }
 ) {
   const body = el('div', { className: 'rc-viewer-body' });
   if (viewer.gitLoading) {
     body.appendChild(el('div', { className: 'rc-empty', text: '正在读取仓库 Git 状态…' }));
     return body;
   }
+  const buildProjectPicker = () =>
+    Array.isArray(projects) && projects.length > 0 && onSelectProjectGit
+      ? el(
+          'div',
+          { className: 'rc-viewer-file-list' },
+          ...projects.map((p) =>
+            el(
+              'button',
+              {
+                type: 'button',
+                className: 'rc-viewer-file-row',
+                onClick: () => onSelectProjectGit(p.id),
+              },
+              el('span', { className: 'rc-pill', 'data-tone': 'info', text: 'Git' }),
+              el('span', { className: 'rc-viewer-file-path', text: p.name || p.shortPath || p.id }),
+              p.shortPath ? el('span', { className: 'rc-viewer-file-stat', text: p.shortPath }) : null
+            )
+          )
+        )
+      : null;
+
   if (viewer.gitError) {
     body.appendChild(el('div', { className: 'rc-error-banner', text: viewer.gitError }));
+    const fallbackPicker = buildProjectPicker();
+    if (fallbackPicker) {
+      body.appendChild(el('div', { className: 'rc-convo-meta', text: '可选择其他已授权仓库查看 Git 变更：' }));
+      body.appendChild(fallbackPicker);
+    }
     return body;
   }
 
   const status = viewer.gitStatus;
   if (!status) {
+    const pickerList = buildProjectPicker();
     body.appendChild(
       el(
         'div',
         { className: 'rc-empty' },
-        el('div', { text: '当前会话未绑定本地 Git 仓库，可在概览页选择任意项目查看 Git 变更。' }),
-        el('button', {
+        el('div', {
+          text: pickerList
+            ? '当前会话未绑定特定 Git 分支，可直接选择下方项目查看变更：'
+            : '当前会话未绑定本地 Git 仓库，可在概览页选择任意项目查看 Git 变更。',
+        }),
+        pickerList ? null : el('button', {
           type: 'button',
           className: 'rc-btn is-sm',
           text: '重试读取',
@@ -185,6 +216,7 @@ function renderGitTab(
         })
       )
     );
+    if (pickerList) body.appendChild(pickerList);
     return body;
   }
 
@@ -207,6 +239,31 @@ function renderGitTab(
     repoPills.push(el('span', { className: 'rc-pill', 'data-tone': 'warn', text: `↓${status.behind}` }));
   }
 
+  const activeProjId = viewer.projectId || status.projectId || '';
+  const switcherSelect =
+    Array.isArray(projects) && projects.length > 1 && onSelectProjectGit
+      ? el(
+          'select',
+          {
+            className: 'rc-select rc-viewer-proj-select',
+            'aria-label': '切换仓库',
+            title: '切换查看其他项目仓库',
+            value: activeProjId,
+            onChange: (ev) => {
+              const nextPid = String(ev.target?.value || '');
+              if (nextPid) onSelectProjectGit(nextPid);
+            },
+          },
+          ...projects.map((p) =>
+            el('option', {
+              value: p.id,
+              text: p.name || p.shortPath || p.id,
+              ...(p.id === activeProjId ? { selected: 'selected' } : {}),
+            })
+          )
+        )
+      : null;
+
   body.appendChild(
     el(
       'div',
@@ -217,12 +274,17 @@ function renderGitTab(
         el('strong', { text: status.repoName || 'Git 仓库' }),
         status.shortPath ? el('span', { className: 'rc-mono rc-ov-muted', text: status.shortPath }) : null
       ),
-      el('button', {
-        type: 'button',
-        className: 'rc-btn is-sm',
-        text: '刷新',
-        onClick: () => onRefreshGit?.(),
-      })
+      el(
+        'div',
+        { className: 'rc-dock-group' },
+        switcherSelect,
+        el('button', {
+          type: 'button',
+          className: 'rc-btn is-sm',
+          text: '刷新',
+          onClick: () => onRefreshGit?.(),
+        })
+      )
     )
   );
   body.appendChild(el('div', { className: 'rc-studio-pills' }, ...repoPills));
@@ -383,6 +445,7 @@ export function renderViewerDrawer(
   container,
   {
     viewer,
+    projects = [],
     canWrite = false,
     online = false,
     onSwitchTab = null,
@@ -391,6 +454,7 @@ export function renderViewerDrawer(
     onRefreshArtifacts = null,
     onQuickReply = null,
     onRefreshGit = null,
+    onSelectProjectGit = null,
     onSelectDirtyFile = null,
     onSelectCommit = null,
     onSelectCommitFile = null,
@@ -446,7 +510,9 @@ export function renderViewerDrawer(
     ),
     tab === 'git'
       ? renderGitTab(viewer, {
+          projects,
           onRefreshGit,
+          onSelectProjectGit,
           onSelectDirtyFile,
           onSelectCommit,
           onSelectCommitFile,
@@ -499,6 +565,30 @@ export function createInitialViewerState() {
   };
 }
 
+export function resolveGitScopeFromState(state, opts = {}) {
+  const hasExplicitCid = Boolean(opts && Object.prototype.hasOwnProperty.call(opts, 'cascadeId'));
+  const explicitPid = String(opts?.projectId || '');
+  const viewerCid = String(state?.viewer?.cascadeId || '');
+  const fallbackCid =
+    state?.viewer?.open && state?.viewer?.projectId ? viewerCid : viewerCid || state?.selectedId || '';
+  const cid = hasExplicitCid ? String(opts.cascadeId || '') : explicitPid ? '' : fallbackCid;
+  const wtMeta = cid ? state?.studioOverview?.worktreeByCid?.[cid] : null;
+  const projects = Array.isArray(state?.studioOverview?.projects) ? state.studioOverview.projects : [];
+  let matchedUnique = '';
+  if (!wtMeta?.projectId && wtMeta?.repoName) {
+    const byName = projects.filter((p) => p && p.name === wtMeta.repoName);
+    if (byName.length === 1) {
+      matchedUnique = byName[0].id || '';
+    }
+  }
+  const pid =
+    explicitPid || state?.viewer?.projectId || wtMeta?.projectId || matchedUnique || state?.selectedProjectId || '';
+  // When bound worktree was cleaned (branch cleared by studio-bridge) and repo projectId is known,
+  // query by projectId directly so stale deleted worktree paths never block repo Git inspection.
+  const effectiveCid = wtMeta && !wtMeta.branch && pid ? '' : cid;
+  return { projectId: pid, cascadeId: effectiveCid, hasWorktreeMeta: Boolean(wtMeta) };
+}
+
 export function createViewerController({
   state,
   getHostEl,
@@ -515,6 +605,7 @@ export function createViewerController({
     if (!host) return;
     renderViewerDrawer(host, {
       viewer: state.viewer,
+      projects: Array.isArray(state.studioOverview?.projects) ? state.studioOverview.projects : [],
       canWrite: Boolean(canSteer?.()),
       online: Boolean(state.hostAttached && state.wsStatus === 'connected'),
       onSwitchTab: (nextTab) => {
@@ -522,8 +613,9 @@ export function createViewerController({
         if (nextTab === 'artifacts') {
           loadArtifacts(state.viewer.cascadeId || state.selectedId || '');
         } else {
+          const fallbackCid = state.viewer.projectId ? '' : state.selectedId || '';
           loadGitStatus({
-            cascadeId: state.viewer.cascadeId || state.selectedId || '',
+            cascadeId: state.viewer.cascadeId || fallbackCid,
             projectId: state.viewer.projectId || state.selectedProjectId || '',
           });
         }
@@ -541,10 +633,14 @@ export function createViewerController({
         onInsertQuickReply?.(text);
       },
       onRefreshGit: () => {
+        const fallbackCid = state.viewer.projectId ? '' : state.selectedId || '';
         loadGitStatus({
-          cascadeId: state.viewer.cascadeId || state.selectedId || '',
+          cascadeId: state.viewer.cascadeId || fallbackCid,
           projectId: state.viewer.projectId || state.selectedProjectId || '',
         });
+      },
+      onSelectProjectGit: (projectId) => {
+        loadGitStatus({ projectId, cascadeId: '' });
       },
       onSelectDirtyFile: (filePath) => {
         loadGitDiff({ filePath });
@@ -639,11 +735,8 @@ export function createViewerController({
     }
   }
 
-  function resolveGitScope({ projectId = '', cascadeId = '' } = {}) {
-    const cid = cascadeId || state.viewer.cascadeId || state.selectedId || '';
-    const wtMeta = cid ? state.studioOverview?.worktreeByCid?.[cid] : null;
-    const pid = projectId || state.viewer.projectId || wtMeta?.projectId || state.selectedProjectId || '';
-    return { projectId: pid, cascadeId: cid };
+  function resolveGitScope(opts = {}) {
+    return resolveGitScopeFromState(state, opts);
   }
 
   async function loadGitStatus({ projectId = '', cascadeId = '' } = {}) {
@@ -657,7 +750,8 @@ export function createViewerController({
     state.viewer.diffTarget = null;
     state.viewer.diffResult = null;
     state.viewer.diffError = '';
-    if (!wsClient || (!scope.projectId && !scope.cascadeId)) {
+    const hasOverviewProjects = Array.isArray(state.studioOverview?.projects) && state.studioOverview.projects.length > 0;
+    if (!wsClient || (!scope.projectId && !scope.cascadeId) || (!scope.projectId && !scope.hasWorktreeMeta && hasOverviewProjects)) {
       state.viewer.gitStatus = null;
       state.viewer.gitLoading = false;
       state.viewer.gitError = '';
@@ -750,7 +844,7 @@ export function createViewerController({
     state.viewer.open = true;
     state.viewer.tab = 'git';
     state.viewer.projectId = projectId || '';
-    state.viewer.cascadeId = cascadeId || state.selectedId || '';
+    state.viewer.cascadeId = cascadeId || (projectId ? '' : state.selectedId || '');
     if (!wasOpen) onEnterModal?.();
     loadGitStatus({ projectId: state.viewer.projectId, cascadeId: state.viewer.cascadeId });
   }

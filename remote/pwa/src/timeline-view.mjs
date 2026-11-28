@@ -550,11 +550,20 @@ export function renderStepCard(step, { hideThinkingProse = false, compact = fals
   }
 
   const isDoneStep = statusInfo.label === 'DONE';
+  const hasVisibleErrorBody = Boolean(
+    String(step.text || '').trim() ||
+      step.error ||
+      (step.thinking && !hideThinkingProse) ||
+      (Array.isArray(step.toolCalls) && step.toolCalls.length > 0) ||
+      step.mediaCount > 0
+  );
+  const isCompactEmptyError = compact && roleAttr === 'error' && !hasVisibleErrorBody;
   const card = el('article', {
     className: 'rc-step',
     'data-type': typeStr,
     'data-role': roleAttr,
     ...(compact ? { 'data-compact': 'true' } : {}),
+    ...(isCompactEmptyError ? { 'data-empty': 'true' } : {}),
   });
 
   const useCompactChatBubble = compact && (roleAttr === 'user' || roleAttr === 'assistant');
@@ -916,6 +925,34 @@ export function renderWaitingCards(
   });
 }
 
+function isErrorStep(step) {
+  const t = String(step?.type || '');
+  return t === 'ERROR_MESSAGE' || t === '17';
+}
+
+function renderErrorGroup(errBatch, opts) {
+  if (errBatch.length === 1) {
+    return renderStepCard(errBatch[0], opts);
+  }
+  const firstIdx = errBatch[0]?.idx ?? '?';
+  const lastIdx = errBatch[errBatch.length - 1]?.idx ?? '?';
+  const body = el('div', { className: 'rc-error-group-body' });
+  for (const s of errBatch) {
+    body.appendChild(renderStepCard(s, opts));
+  }
+  return el(
+    'details',
+    { className: 'rc-error-group' },
+    el(
+      'summary',
+      { className: 'rc-error-group-sum' },
+      el('span', { text: `连续 ${errBatch.length} 次执行异常 (#${firstIdx}–#${lastIdx})` }),
+      el('span', { className: 'rc-pill', 'data-tone': 'danger', text: `${errBatch.length} 项` })
+    ),
+    body
+  );
+}
+
 export function renderDetailTimeline({
   state,
   refs,
@@ -939,7 +976,19 @@ export function renderDetailTimeline({
     clearNode(refs.detailSub);
     clearNode(refs.timeline);
     refs.timeline.appendChild(
-      el('div', { className: 'rc-empty', text: '从左侧选择一个会话以查看消息时间线、工具调用与实时流。' })
+      el(
+        'div',
+        { className: 'rc-empty rc-empty-card' },
+        el('div', { className: 'rc-empty-title', text: 'AGY Studio Remote 工作台' }),
+        el('div', { text: '从左侧选择一个会话以查看消息时间线、工具调用与实时流。' }),
+        el(
+          'div',
+          { className: 'rc-empty-shortcuts rc-desktop-only' },
+          el('span', { className: 'rc-kbd-hint' }, el('kbd', { className: 'rc-kbd', text: '⌘K' }), '搜索会话'),
+          el('span', { className: 'rc-kbd-hint' }, el('kbd', { className: 'rc-kbd', text: '⌘B' }), '切换侧栏'),
+          el('span', { className: 'rc-kbd-hint' }, el('kbd', { className: 'rc-kbd', text: '⌘.' }), '切换概览')
+        )
+      )
     );
     return;
   }
@@ -1005,11 +1054,17 @@ export function renderDetailTimeline({
     refs.timeline.appendChild(el('div', { className: 'rc-empty', text: '该会话暂无可显示步骤。' }));
   } else {
     let activityBatch = [];
+    let errorBatch = [];
     const flushActivity = () => {
       if (activityBatch.length === 0) return;
       const groupEl = renderActivityGroup(activityBatch, { hideThinkingProse });
       if (groupEl) refs.timeline.appendChild(groupEl);
       activityBatch = [];
+    };
+    const flushErrors = () => {
+      if (errorBatch.length === 0) return;
+      refs.timeline.appendChild(renderErrorGroup(errorBatch, { hideThinkingProse, compact: true, onOpenArtifact }));
+      errorBatch = [];
     };
 
     for (const step of steps) {
@@ -1018,13 +1073,21 @@ export function renderDetailTimeline({
         continue;
       }
       if (isActivityStep(step)) {
+        flushErrors();
         activityBatch.push(step);
         continue;
       }
+      if (isErrorStep(step)) {
+        flushActivity();
+        errorBatch.push(step);
+        continue;
+      }
       flushActivity();
+      flushErrors();
       refs.timeline.appendChild(renderStepCard(step, { hideThinkingProse, compact: true, onOpenArtifact }));
     }
     flushActivity();
+    flushErrors();
   }
 
   const streamStatusActive =

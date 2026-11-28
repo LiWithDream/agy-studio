@@ -4,6 +4,107 @@
  */
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const DESKTOP_BREAKPOINT_PX = 960;
+export const PANE_WIDTH_BOUNDS = {
+  sidebar: { min: 200, max: 420, compactDefault: 236, wideDefault: 284, default: 264 },
+  overview: { min: 240, max: 440, compactDefault: 264, wideDefault: 316, default: 296 },
+  minCenter: 480,
+};
+
+export function getDefaultPaneWidth(kind, viewportWidth = 1280) {
+  const b = kind === 'sidebar' ? PANE_WIDTH_BOUNDS.sidebar : PANE_WIDTH_BOUNDS.overview;
+  const vw = Number(viewportWidth);
+  if (Number.isFinite(vw) && vw > 0 && vw <= 1180) return b.compactDefault;
+  if (Number.isFinite(vw) && vw >= 1481) return b.wideDefault;
+  return b.default;
+}
+
+export function clampPaneWidth(
+  kind,
+  rawWidth,
+  { viewportWidth = 1280, otherPaneWidth = 0, otherCollapsed = false } = {}
+) {
+  const b = kind === 'sidebar' ? PANE_WIDTH_BOUNDS.sidebar : PANE_WIDTH_BOUNDS.overview;
+  const vw = Number(viewportWidth);
+  const otherKind = kind === 'sidebar' ? 'overview' : 'sidebar';
+  const effectiveOther = otherCollapsed
+    ? 0
+    : Number.isFinite(Number(otherPaneWidth)) && Number(otherPaneWidth) > 0
+      ? Number(otherPaneWidth)
+      : getDefaultPaneWidth(otherKind, vw);
+  const viewportCap =
+    Number.isFinite(vw) && vw > 0 ? Math.floor(vw - effectiveOther - PANE_WIDTH_BOUNDS.minCenter) : b.max;
+  const maxAllowed = Math.max(b.min, Math.min(b.max, viewportCap));
+  const fallback = getDefaultPaneWidth(kind, vw);
+  const target = Number.isFinite(Number(rawWidth)) ? Math.round(Number(rawWidth)) : fallback;
+  return {
+    min: b.min,
+    max: maxAllowed,
+    value: Math.max(b.min, Math.min(maxAllowed, target)),
+  };
+}
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+const ICON_SHAPES = {
+  sidebar: [
+    ['rect', { x: '2', y: '2.75', width: '12', height: '10.5', rx: '2' }],
+    ['line', { x1: '6.25', y1: '2.75', x2: '6.25', y2: '13.25' }],
+  ],
+  overview: [
+    ['rect', { x: '2', y: '2.75', width: '12', height: '10.5', rx: '2' }],
+    ['line', { x1: '9.75', y: '2.75', x2: '9.75', y2: '13.25' }],
+  ],
+  refresh: [
+    ['path', { d: 'M13.2 8a5.2 5.2 0 1 1-1.45-3.6' }],
+    ['polyline', { points: '13.4 2.4 13.4 5.6 10.2 5.6' }],
+  ],
+  more: [
+    ['circle', { cx: '3.5', cy: '8', r: '1.15', fill: 'currentColor', stroke: 'none' }],
+    ['circle', { cx: '8', cy: '8', r: '1.15', fill: 'currentColor', stroke: 'none' }],
+    ['circle', { cx: '12.5', cy: '8', r: '1.15', fill: 'currentColor', stroke: 'none' }],
+  ],
+  doc: [
+    ['path', { d: 'M4.25 2.25h5l3 3v8.5a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-10.5a1 1 0 0 1 1-1z' }],
+    ['polyline', { points: '9.25 2.25 9.25 5.25 12.25 5.25' }],
+    ['line', { x1: '5.5', y1: '8.5', x2: '10.5', y2: '8.5' }],
+    ['line', { x1: '5.5', y1: '11.2', x2: '8.5', y2: '11.2' }],
+  ],
+  git: [
+    ['circle', { cx: '5', cy: '3.75', r: '1.5' }],
+    ['circle', { cx: '5', cy: '12.25', r: '1.5' }],
+    ['circle', { cx: '11', cy: '6', r: '1.5' }],
+    ['line', { x1: '5', y1: '5.25', x2: '5', y2: '10.75' }],
+    ['path', { d: 'M11 7.5v1a2.5 2.5 0 0 1-2.5 2.5H5' }],
+  ],
+  arrowDown: [
+    ['line', { x1: '8', y1: '2.75', x2: '8', y2: '12.5' }],
+    ['polyline', { points: '4.25 8.75 8 12.75 11.75 8.75' }],
+  ],
+};
+
+export function createSvgIcon(kind, { size = 15, className = 'rc-svg-icon' } = {}) {
+  const shapes = ICON_SHAPES[kind];
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('class', className);
+  svg.setAttribute('width', String(size));
+  svg.setAttribute('height', String(size));
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.45');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  if (shapes) {
+    for (const [tag, attrs] of shapes) {
+      const node = document.createElementNS(SVG_NS, tag);
+      for (const [k, v] of Object.entries(attrs)) {
+        node.setAttribute(k, v);
+      }
+      svg.appendChild(node);
+    }
+  }
+  return svg;
+}
 
 export function resolveLayoutMode(pref, viewportWidth = 1024) {
   if (pref === 'desktop' || pref === 'mobile') return pref;

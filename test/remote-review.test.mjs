@@ -280,3 +280,87 @@ test('Phase 0 helpers & PWA search/slashCommands: cold-start compact fallback, d
     globalThis.document = prevDoc;
   }
 });
+
+test('git-bridge: preserves mixed-case shortPath/repoName, authorizes live linked worktrees, and falls back deleted worktreePath to authorized repoRoot', async () => {
+  const mod = await import(pathToFileURL(path.join(REPO, 'core/daemon/remote/git-bridge.mjs')).href);
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'maga-gitb-wt-'));
+  try {
+    const repoDir = path.join(tmpRoot, 'MixedCaseRepo');
+    const wtBase = path.join(tmpRoot, 'MixedCaseRepo-wt');
+    const activeWtDir = path.join(wtBase, 'feat-live');
+    const deletedWtDir = path.join(wtBase, 'feat-cleaned');
+    const outsideRepoDir = path.join(tmpRoot, 'UnauthorizedOutsideRepo');
+    const nativeProjectsDir = path.join(tmpRoot, 'native-projects');
+    const convWtDir = path.join(tmpRoot, 'conv-wt');
+
+    fs.mkdirSync(repoDir, { recursive: true });
+    fs.mkdirSync(wtBase, { recursive: true });
+    fs.mkdirSync(outsideRepoDir, { recursive: true });
+    fs.mkdirSync(nativeProjectsDir, { recursive: true });
+    fs.mkdirSync(convWtDir, { recursive: true });
+
+    runGit(repoDir, ['init', '-b', 'main']);
+    fs.writeFileSync(path.join(repoDir, 'README.md'), '# MixedCaseRepo\n', 'utf8');
+    runGit(repoDir, ['add', 'README.md']);
+    runGit(repoDir, ['commit', '-m', 'init']);
+    runGit(repoDir, ['worktree', 'add', '-b', 'feat/live', activeWtDir]);
+
+    runGit(outsideRepoDir, ['init', '-b', 'main']);
+    fs.writeFileSync(path.join(outsideRepoDir, 'secret.txt'), 'nope\n', 'utf8');
+    runGit(outsideRepoDir, ['add', 'secret.txt']);
+    runGit(outsideRepoDir, ['commit', '-m', 'outside init']);
+
+    fs.writeFileSync(
+      path.join(nativeProjectsDir, 'proj-mixed.json'),
+      JSON.stringify({ id: 'proj-mixed', name: 'MixedCaseRepo', folderUris: [pathToFileURL(repoDir).href] }),
+      'utf8'
+    );
+
+    const activeWtCid = 'aaaaaaaa-1111-4111-8111-111111111111';
+    const deletedWtCid = 'bbbbbbbb-2222-4222-8222-222222222222';
+    const unauthCid = 'cccccccc-3333-4333-8333-333333333333';
+
+    fs.writeFileSync(
+      path.join(convWtDir, `${activeWtCid}.json`),
+      JSON.stringify({ worktreePath: activeWtDir, repoRoot: repoDir, branch: 'feat/live' }),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(convWtDir, `${deletedWtCid}.json`),
+      JSON.stringify({ worktreePath: deletedWtDir, repoRoot: repoDir, branch: 'feat/cleaned' }),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(convWtDir, `${unauthCid}.json`),
+      JSON.stringify({ worktreePath: path.join(wtBase, 'gone-unauth'), repoRoot: outsideRepoDir, branch: 'feat/unauth' }),
+      'utf8'
+    );
+
+    const opts = { nativeProjectsDir, authorizedDirs: [repoDir], convWtDir };
+
+    // 1. Live linked worktree resolves without needing explicit authorizedWorktreeRoots override
+    const liveStatus = await mod.getRemoteProjectGitStatus({ cascadeId: activeWtCid }, opts);
+    assert.equal(liveStatus.ok, true);
+    assert.equal(liveStatus.branch, 'feat/live');
+    assert.equal(liveStatus.repoName, 'MixedCaseRepo');
+    assert.ok(
+      liveStatus.shortPath.includes('MixedCaseRepo'),
+      `expected mixed-case shortPath, got: ${liveStatus.shortPath}`
+    );
+
+    // 2. Deleted worktree falls back to authorized repoRoot and preserves mixed case
+    const cleanedStatus = await mod.getRemoteProjectGitStatus({ cascadeId: deletedWtCid }, opts);
+    assert.equal(cleanedStatus.ok, true);
+    assert.equal(cleanedStatus.branch, 'main');
+    assert.equal(cleanedStatus.repoName, 'MixedCaseRepo');
+    assert.ok(cleanedStatus.shortPath.endsWith('MixedCaseRepo'));
+
+    // 3. Deleted worktree pointing to unauthorized repoRoot still enforces auth root boundary
+    await assert.rejects(
+      () => mod.getRemoteProjectGitStatus({ cascadeId: unauthCid }, opts),
+      /project_not_authorized/
+    );
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});

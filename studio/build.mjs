@@ -397,15 +397,26 @@ export async function buildRemotePwa({ outDir = REMOTE_PWA_DIST, allowPrebuilt =
   const jsOut = `/* AGY Studio Remote PWA — compiled from remote/pwa/src/app.mjs */\n${compiledJs}\n`;
   new Function(jsOut);
 
-  const cssRaw = readFileSync(REMOTE_PWA_CSS, 'utf8');
-  if (cssRaw.includes(':has(')) {
+  if (!existsSync(REMOTE_PWA_CSS)) {
+    throw new Error(`Missing remote PWA stylesheet at ${REMOTE_PWA_CSS}`);
+  }
+  const cssBundled = await esbuild.build({
+    entryPoints: [REMOTE_PWA_CSS],
+    bundle: true,
+    write: false,
+    minify: false,
+    legalComments: 'none',
+  });
+  const cssOut = cssBundled.outputFiles?.[0]?.text || '';
+  if (!cssOut.trim()) {
+    throw new Error('esbuild produced an empty CSS bundle for remote/pwa/src/styles.css');
+  }
+  if (cssOut.includes(':has(')) {
     throw new Error('remote/pwa/src/styles.css must not contain :has() selectors');
   }
-  const cssResult = await esbuild.transform(cssRaw, {
-    loader: 'css',
-    minify: false,
-  });
-  const cssOut = cssResult.code;
+  if (cssOut.includes('height: 100dvh') || cssOut.includes('height:100dvh')) {
+    throw new Error('remote/pwa/src/styles.css must avoid height: 100dvh');
+  }
 
   mkdirSync(outDir, { recursive: true });
 

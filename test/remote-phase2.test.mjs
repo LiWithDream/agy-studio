@@ -20,6 +20,17 @@ const GW_DIR = path.join(REPO, 'remote', 'gateway');
 const PWA_DIR = path.join(REPO, 'remote', 'pwa');
 
 const configMod = await import(pathToFileURL(path.join(GW_DIR, 'config.mjs')).href);
+
+function collectCssFilesRecursive(dir) {
+  const out = [];
+  if (!fs.existsSync(dir)) return out;
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, ent.name);
+    if (ent.isDirectory()) out.push(...collectCssFilesRecursive(abs));
+    else if (ent.isFile() && ent.name.endsWith('.css')) out.push(abs);
+  }
+  return out;
+}
 const serverMod = await import(pathToFileURL(path.join(GW_DIR, 'server.mjs')).href);
 const lockMod = await import(pathToFileURL(path.join(REPO, 'core', 'daemon', 'remote', 'cascade-lock.mjs')).href);
 const studioBridgeMod = await import(pathToFileURL(path.join(REPO, 'core', 'daemon', 'remote', 'studio-bridge.mjs')).href);
@@ -749,8 +760,17 @@ test('Phase 2 static invariants: 7 gateway files, <2000 lines, Zero-XSS across a
       `PWA module ${fname} must not contain XSS sinks`
     );
   }
-  const cssSrc = fs.readFileSync(path.join(PWA_DIR, 'src', 'styles.css'), 'utf8');
-  assert.equal(cssSrc.includes(':has('), false);
+  const pwaCssFiles = collectCssFilesRecursive(path.join(PWA_DIR, 'src'));
+  assert.ok(pwaCssFiles.length >= 2, 'expected root styles.css plus modular desktop stylesheets');
+  for (const cssAbs of pwaCssFiles) {
+    const cssText = fs.readFileSync(cssAbs, 'utf8');
+    const rel = path.relative(REPO, cssAbs);
+    if (path.basename(cssAbs) !== 'styles.css') {
+      assert.ok(cssText.split('\n').length < 2000, `${rel} must stay < 2000 lines`);
+    }
+    assert.equal(cssText.includes(':has('), false, `${rel} must not contain :has(`);
+    assert.equal(cssText.includes('height: 100dvh'), false, `${rel} must not contain height: 100dvh`);
+  }
 
   const appSrc = fs.readFileSync(path.join(PWA_DIR, 'src', 'app.mjs'), 'utf8');
   assert.match(appSrc, /workspaceRefs\s*=\s*\{\s*topbar,/);
@@ -3329,6 +3349,202 @@ test('Phase 2 v1.4.1 live role promotion push (ws-server -> ws-client) and epoch
     restore('localStorage', origLs);
     for (const s of openSockets) s.destroy();
     await gw?.close().catch(() => {});
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('Remote Desktop Workbench UI: CSS bundle/invariants, pane clamp, theme switch, overview dots, git scope & error collapse', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'maga-rem-workbench-'));
+  const distOut = path.join(tmpRoot, 'dist');
+  const { buildRemotePwa } = await import(pathToFileURL(path.join(REPO, 'studio', 'build.mjs')).href);
+  const { JSDOM } = await import('jsdom');
+  const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: 'http://127.0.0.1/' });
+  const prevDoc = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const prevWin = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'document', { value: dom.window.document, configurable: true, writable: true });
+  Object.defineProperty(globalThis, 'window', { value: dom.window, configurable: true, writable: true });
+
+  try {
+    // 1. buildRemotePwa bundles @import "./styles/desktop-workbench.css" and enforces zero :has() / 100dvh
+    await buildRemotePwa({ outDir: distOut });
+    const bundledCss = fs.readFileSync(path.join(distOut, 'styles.css'), 'utf8');
+    assert.ok(bundledCss.includes('--rc-sidebar-w') && bundledCss.includes('.rc-pane-resizer'));
+    assert.ok(bundledCss.includes(':root[data-theme=light]') && bundledCss.includes(':root[data-theme=dark]'));
+    assert.ok(bundledCss.includes('height: var(--rc-app-h, 100%)') && bundledCss.includes('color-scheme: light dark'));
+    assert.equal(bundledCss.includes(':has('), false);
+    assert.equal(bundledCss.includes('height: 100dvh'), false);
+
+    // 2. Joint pane width clamp respects viewportWidth - otherPaneWidth - 480
+    const uiHelpersMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'ui-helpers.mjs')).href);
+    assert.equal(uiHelpersMod.getDefaultPaneWidth('sidebar', 1080), 236);
+    assert.equal(uiHelpersMod.getDefaultPaneWidth('overview', 1600), 316);
+    const clamped1080 = uiHelpersMod.clampPaneWidth('sidebar', 420, {
+      viewportWidth: 1080,
+      otherPaneWidth: 264,
+      otherCollapsed: false,
+    });
+    assert.equal(clamped1080.max, 336);
+    assert.equal(clamped1080.value, 336);
+    const collapsedOther = uiHelpersMod.clampPaneWidth('sidebar', 420, {
+      viewportWidth: 1080,
+      otherPaneWidth: 264,
+      otherCollapsed: true,
+    });
+    assert.equal(collapsedOther.value, 420);
+
+    // 3. Theme switch updates data-theme & live theme-color meta
+    const mobileEnhMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'mobile-enhancements.mjs')).href);
+    const doc = dom.window.document;
+    mobileEnhMod.applyThemePref('dark');
+    assert.equal(doc.documentElement.getAttribute('data-theme'), 'dark');
+    assert.equal(doc.getElementById('rc-theme-color-live')?.getAttribute('content'), '#212120');
+    mobileEnhMod.applyThemePref('light');
+    assert.equal(doc.documentElement.getAttribute('data-theme'), 'light');
+    assert.equal(doc.getElementById('rc-theme-color-live')?.getAttribute('content'), '#ffffff');
+    mobileEnhMod.applyThemePref('auto');
+    assert.equal(doc.documentElement.hasAttribute('data-theme'), false);
+
+    // 4. Overview panel renders legend dots & usage col track cleanly without setAttribute('style')
+    const overviewMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'overview-panel.mjs')).href);
+    const overviewSrc = fs.readFileSync(path.join(PWA_DIR, 'src', 'overview-panel.mjs'), 'utf8');
+    assert.equal(overviewSrc.includes("setAttribute('style'"), false);
+    const ovHost = doc.createElement('div');
+    overviewMod.renderOverviewPanel(ovHost, {
+      usageRange: '7d',
+      onChangeUsageRange: () => {},
+      overview: {
+        todayUsage: { totalTokens: 1000, requests: 2, cacheRead: 700, uncached: 200, output: 100 },
+        usageDays: [
+          { date: '2026-11-27', totalTokens: 400, requests: 1, cacheRead: 250, uncached: 100, output: 50 },
+          { date: '2026-11-28', totalTokens: 1000, requests: 2, cacheRead: 700, uncached: 200, output: 100 },
+        ],
+        projects: [{ id: 'p-1', name: 'MAGA', shortPath: '~/Developer/MAGA', isGitRepo: true, worktrees: [] }],
+        worktreeByCid: {},
+      },
+    });
+    assert.equal(ovHost.querySelectorAll('.rc-ov-legend-dot').length, 3);
+    assert.equal(ovHost.querySelectorAll('.rc-usage-col-track .rc-usage-col-bar').length, 2);
+
+    // 5. Composer bar omits duplicate desktop 回到底部 button
+    const composerSrc = fs.readFileSync(path.join(PWA_DIR, 'src', 'composer-bar.mjs'), 'utf8');
+    assert.equal(composerSrc.includes('回到底部'), false);
+
+    // 6. Viewer drawer: unique repoName fallback, ambiguous repoName safety, cleaned worktree projectId, explicit repo switch, & gitError safety
+    const viewerMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'viewer-drawer.mjs')).href);
+    const scopeBaseState = {
+      selectedId: 'cid-cleaned',
+      selectedProjectId: '',
+      viewer: viewerMod.createInitialViewerState(),
+      studioOverview: {
+        projects: [
+          { id: 'proj-unique', name: 'UniqueRepo' },
+          { id: 'proj-dup-1', name: 'SharedName' },
+          { id: 'proj-dup-2', name: 'SharedName' },
+        ],
+        worktreeByCid: {
+          'cid-cleaned': { branch: '', repoName: 'UniqueRepo', projectId: 'proj-unique' },
+          'cid-ambig': { branch: '', repoName: 'SharedName', projectId: '' },
+        },
+      },
+    };
+    const cleanedScope = viewerMod.resolveGitScopeFromState(scopeBaseState, { cascadeId: 'cid-cleaned' });
+    assert.equal(cleanedScope.projectId, 'proj-unique');
+    assert.equal(cleanedScope.cascadeId, '');
+
+    const ambigScope = viewerMod.resolveGitScopeFromState(
+      { ...scopeBaseState, selectedId: 'cid-ambig' },
+      { cascadeId: 'cid-ambig' }
+    );
+    assert.equal(ambigScope.projectId, '');
+
+    const explicitSwitchScope = viewerMod.resolveGitScopeFromState(
+      { ...scopeBaseState, viewer: { ...scopeBaseState.viewer, open: true, cascadeId: 'cid-cleaned' } },
+      { projectId: 'proj-dup-2', cascadeId: '' }
+    );
+    assert.equal(explicitSwitchScope.projectId, 'proj-dup-2');
+    assert.equal(explicitSwitchScope.cascadeId, '');
+
+    const commitDrillScope = viewerMod.resolveGitScopeFromState({
+      ...scopeBaseState,
+      viewer: { ...scopeBaseState.viewer, open: true, projectId: 'proj-dup-2', cascadeId: '' },
+    });
+    assert.equal(commitDrillScope.projectId, 'proj-dup-2');
+    assert.equal(commitDrillScope.cascadeId, '');
+
+    const drawerHost = doc.createElement('div');
+    viewerMod.renderViewerDrawer(drawerHost, {
+      viewer: {
+        ...viewerMod.createInitialViewerState(),
+        open: true,
+        tab: 'git',
+        gitError: '该项目目录未在桌面端授权列表中',
+        gitStatus: { branch: 'stale-branch', dirtyCount: 1, dirtyFiles: [{ path: 'stale.txt', status: 'M' }] },
+      },
+      projects: [{ id: 'proj-unique', name: 'UniqueRepo', shortPath: '~/UniqueRepo' }],
+    });
+    assert.ok(drawerHost.querySelector('.rc-error-banner'));
+    assert.equal(drawerHost.textContent.includes('stale.txt'), false, 'gitError must not render stale gitStatus');
+
+    const switcherHost = doc.createElement('div');
+    viewerMod.renderViewerDrawer(switcherHost, {
+      viewer: {
+        ...viewerMod.createInitialViewerState(),
+        open: true,
+        tab: 'git',
+        projectId: 'proj-unique',
+        gitStatus: { branch: 'main', dirtyCount: 0, dirtyFiles: [], recentCommits: [], repoName: 'UniqueRepo', shortPath: '~/UniqueRepo' },
+      },
+      projects: [
+        { id: 'proj-unique', name: 'UniqueRepo', shortPath: '~/UniqueRepo' },
+        { id: 'proj-dup-1', name: 'SharedName', shortPath: '~/SharedName' },
+      ],
+      onSelectProjectGit: () => {},
+    });
+    assert.equal(switcherHost.querySelectorAll('select.rc-viewer-proj-select option').length, 2);
+
+    // 7. Timeline view: consecutive errors collapse, compact empty error tag, and empty !cid shortcut card
+    const timelineMod = await import(pathToFileURL(path.join(PWA_DIR, 'src', 'timeline-view.mjs')).href);
+    const tlHost = doc.createElement('div');
+    const tlTitle = doc.createElement('h2');
+    const tlSub = doc.createElement('div');
+    timelineMod.renderDetailTimeline({
+      state: { selectedId: null, conversations: [], snapshots: new Map(), streams: new Map() },
+      refs: { timeline: tlHost, detailTitle: tlTitle, detailSub: tlSub },
+    });
+    assert.ok(tlHost.querySelector('.rc-empty-card'));
+    assert.equal(tlHost.querySelectorAll('.rc-empty-shortcuts .rc-kbd').length, 3);
+
+    const groupedCid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee9';
+    timelineMod.renderDetailTimeline({
+      state: {
+        selectedId: groupedCid,
+        identity: { role: 'observe' },
+        conversations: [{ id: groupedCid, title: 'Error Group Test', status: 'IDLE' }],
+        snapshots: new Map([
+          [
+            groupedCid,
+            {
+              steps: [
+                { idx: 1, type: 'ERROR_MESSAGE', status: 'ERROR', text: 'err one' },
+                { idx: 2, type: 'ERROR_MESSAGE', status: 'ERROR', text: 'err two' },
+                { idx: 3, type: 'USER_INPUT', status: 'DONE', text: 'retry' },
+                { idx: 4, type: 'ERROR_MESSAGE', status: 'ERROR', text: '' },
+              ],
+            },
+          ],
+        ]),
+        streams: new Map(),
+      },
+      refs: { timeline: tlHost, detailTitle: tlTitle, detailSub: tlSub },
+    });
+    assert.equal(tlHost.querySelectorAll('details.rc-error-group').length, 1);
+    assert.ok(tlHost.querySelector('.rc-step[data-role="error"][data-empty="true"]'));
+  } finally {
+    if (prevDoc) Object.defineProperty(globalThis, 'document', prevDoc);
+    else delete globalThis.document;
+    if (prevWin) Object.defineProperty(globalThis, 'window', prevWin);
+    else delete globalThis.window;
+    dom.window.close();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });

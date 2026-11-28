@@ -25,8 +25,11 @@ const ALERTS_STORAGE_KEY = 'rc:alertsEnabled';
 
 export const STORAGE_KEYS = {
   layoutPref: 'agy_remote_layout_mode',
+  themePref: 'agy_remote_theme',
   sidebarCollapsed: 'agy_remote_sidebar_collapsed',
   overviewCollapsed: 'agy_remote_overview_collapsed',
+  sidebarWidth: 'agy_remote_sidebar_w',
+  overviewWidth: 'agy_remote_overview_w',
   sidebarGroupBy: 'agy_remote_sidebar_group',
 };
 
@@ -45,6 +48,33 @@ export function writeStoredPref(key, value) {
     if (typeof window === 'undefined' || !window.localStorage) return;
     window.localStorage.setItem(key, String(value));
   } catch {}
+}
+
+export function applyThemePref(pref = 'auto') {
+  if (typeof document === 'undefined') return 'auto';
+  const normalized = pref === 'light' || pref === 'dark' ? pref : 'auto';
+  const root = document.documentElement;
+  if (root) {
+    if (normalized === 'auto') root.removeAttribute('data-theme');
+    else root.setAttribute('data-theme', normalized);
+  }
+  try {
+    const darkMql =
+      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia('(prefers-color-scheme: dark)')
+        : null;
+    const dark = normalized === 'dark' || (normalized === 'auto' && Boolean(darkMql?.matches));
+    const color = dark ? '#212120' : '#ffffff';
+    let liveMeta = document.getElementById('rc-theme-color-live');
+    if (!liveMeta && document.head) {
+      liveMeta = document.createElement('meta');
+      liveMeta.id = 'rc-theme-color-live';
+      liveMeta.setAttribute('name', 'theme-color');
+      document.head.appendChild(liveMeta);
+    }
+    if (liveMeta) liveMeta.setAttribute('content', color);
+  } catch {}
+  return normalized;
 }
 
 export function defaultOverviewCollapsed() {
@@ -75,18 +105,7 @@ export function bindViewportHeightSync() {
   const darkMql =
     typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
   const syncThemeMeta = () => {
-    try {
-      const dark = Boolean(darkMql?.matches);
-      const color = dark ? '#212120' : '#ffffff';
-      let liveMeta = document.getElementById('rc-theme-color-live');
-      if (!liveMeta && document.head) {
-        liveMeta = document.createElement('meta');
-        liveMeta.id = 'rc-theme-color-live';
-        liveMeta.setAttribute('name', 'theme-color');
-        document.head.appendChild(liveMeta);
-      }
-      if (liveMeta) liveMeta.setAttribute('content', color);
-    } catch {}
+    applyThemePref(readStoredPref(STORAGE_KEYS.themePref, 'auto'));
   };
   apply();
   syncThemeMeta();
@@ -1030,6 +1049,10 @@ export function createMoreMenuController({
   renderMenu,
   formatPresetBadge,
   layoutButtonLabel,
+  themeButtonLabel = null,
+  writeThemePref = null,
+  getLayoutMode = null,
+  onToggleDesktopOverview = null,
   alertManager,
   setActionNotice,
   writeLayoutPref,
@@ -1045,12 +1068,21 @@ export function createMoreMenuController({
     const nativeMode = isNativeAndroidApp();
     const nativeVer = nativeMode ? getNativeAppVersion() : '';
     const keepAliveOn = nativeMode ? isNativeKeepAliveEnabled() : false;
+    const canSwitchTheme = typeof themeButtonLabel === 'function' && typeof writeThemePref === 'function';
+    const isDesktopMode = typeof getLayoutMode === 'function' && getLayoutMode() === 'desktop';
     renderMenu(getMenuEl(), {
       open: state.moreMenuOpen,
       hostLine: `${baseHostLine}${rttSuffix}`,
+      deviceLine: state.identity?.deviceName || '',
       role: state.identity?.role || 'observe',
       presetLabel: formatPresetBadge(state.globalPreset).label,
+      themeLabel: canSwitchTheme ? themeButtonLabel(state.themePref || 'auto') : '',
       layoutLabel: layoutButtonLabel(state.layoutPref),
+      overviewLabel: isDesktopMode
+        ? state.overviewCollapsed
+          ? '展开概览面板'
+          : '收起概览面板'
+        : '查看配额与概览',
       alertLabel: alertManager.getAlertLabel(),
       keepAliveLabel: nativeMode
         ? keepAliveOn
@@ -1099,6 +1131,18 @@ export function createMoreMenuController({
         render();
         setActionNotice(next ? '已开启完成与审批提醒' : '已关闭完成与审批提醒');
       },
+      onCycleTheme: canSwitchTheme
+        ? () => {
+            const order = ['auto', 'light', 'dark'];
+            const cur = order.includes(state.themePref) ? state.themePref : 'auto';
+            const next = order[(order.indexOf(cur) + 1) % order.length];
+            state.themePref = next;
+            writeThemePref(next);
+            applyThemePref(next);
+            render();
+            setActionNotice(`已切换${themeButtonLabel(next)}`);
+          }
+        : null,
       onCycleLayout: () => {
         const order = ['auto', 'desktop', 'mobile'];
         const next = order[(order.indexOf(state.layoutPref) + 1) % order.length];
@@ -1110,6 +1154,11 @@ export function createMoreMenuController({
       },
       onOpenOverview: () => {
         state.moreMenuOpen = false;
+        if (typeof getLayoutMode === 'function' && getLayoutMode() === 'desktop' && typeof onToggleDesktopOverview === 'function') {
+          onToggleDesktopOverview();
+          render();
+          return;
+        }
         state.mobileTab = 'overview';
         state.mobileView = 'list';
         applyLayoutAttrs();

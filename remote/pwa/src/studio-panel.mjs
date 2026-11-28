@@ -292,9 +292,12 @@ export function renderMobileMoreMenu(
   {
     open = false,
     hostLine = '',
+    deviceLine = '',
     role = 'observe',
     presetLabel = '',
+    themeLabel = '',
     layoutLabel = '',
+    overviewLabel = '查看配额与概览',
     alertLabel = '',
     keepAliveLabel = '',
     updateLabel = '',
@@ -302,6 +305,7 @@ export function renderMobileMoreMenu(
     onToggleKeepAlive = null,
     onCheckForUpdate = null,
     onToggleAlerts = null,
+    onCycleTheme = null,
     onCycleLayout = null,
     onOpenOverview = null,
     onRefreshAll = null,
@@ -322,6 +326,7 @@ export function renderMobileMoreMenu(
       'div',
       { className: 'rc-more-meta' },
       el('div', { className: 'rc-more-meta-line', text: `${hostLine} · ${String(role || 'observe').toUpperCase()}` }),
+      deviceLine ? el('div', { className: 'rc-more-meta-sub', text: `设备：${deviceLine}` }) : null,
       el('div', { className: 'rc-more-meta-sub', text: `权限策略：${presetLabel || '--'}` })
     ),
     onReconnectNow
@@ -379,6 +384,17 @@ export function renderMobileMoreMenu(
           },
         })
       : null,
+    themeLabel && onCycleTheme
+      ? el('button', {
+          type: 'button',
+          className: 'rc-more-item',
+          text: themeLabel,
+          onClick: (ev) => {
+            ev?.stopPropagation?.();
+            onCycleTheme?.();
+          },
+        })
+      : null,
     el('button', {
       type: 'button',
       className: 'rc-more-item',
@@ -391,7 +407,7 @@ export function renderMobileMoreMenu(
     el('button', {
       type: 'button',
       className: 'rc-more-item',
-      text: '查看配额与概览',
+      text: overviewLabel || '查看配额与概览',
       onClick: (ev) => {
         ev?.stopPropagation?.();
         onOpenOverview?.();

@@ -16,6 +16,7 @@ import {
   collectAuthorizedWorktreeRootsAsync,
   extractNativeProjectFolderUris,
   getAuthorizedProjectDirs,
+  getRealPathPreserveCase,
   loadConversationWorktreeMap,
   normalizeRealPath,
 } from '../worktrees.mjs';
@@ -167,14 +168,25 @@ async function resolveAuthorizedRepoRoot({ projectId = '', cascadeId = '' } = {}
   let repoName = '';
   let resolvedProjectId = pid;
 
+  const isExistingDir = (dirPath) => {
+    if (!dirPath) return false;
+    try {
+      return fs.statSync(dirPath).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+
   if (cid) {
     const convMap = loadConversationWorktreeMap(opts.convWtDir ? { convWtDir: opts.convWtDir } : undefined);
     const rec = convMap.entries?.[cid] || null;
     if (rec && typeof rec === 'object') {
-      const candidate = String(rec.worktreePath || rec.repoRoot || '').trim();
+      const wtCand = String(rec.worktreePath || '').trim();
+      const rootCand = String(rec.repoRoot || '').trim();
+      const candidate = isExistingDir(wtCand) ? wtCand : isExistingDir(rootCand) ? rootCand : '';
       if (candidate) {
         targetDir = candidate;
-        repoName = path.basename(String(rec.repoRoot || candidate));
+        repoName = path.basename(rootCand || candidate);
       }
     }
   }
@@ -214,12 +226,13 @@ async function resolveAuthorizedRepoRoot({ projectId = '', cascadeId = '' } = {}
     }
   }
   if (!authorized) {
-    const wtRoots = Array.isArray(opts.authorizedWorktreeRoots)
-      ? opts.authorizedWorktreeRoots.map((r) => normalizeRealPath(r))
+    const rawWtRoots = Array.isArray(opts.authorizedWorktreeRoots)
+      ? opts.authorizedWorktreeRoots
       : await collectAuthorizedWorktreeRootsAsync('', {
           nativeProjectsDir: opts.nativeProjectsDir || NATIVE_PROJECTS_DIR,
           authorizedDirs,
         });
+    const wtRoots = rawWtRoots.map((r) => normalizeRealPath(r));
     authorized = wtRoots.some((wt) => wt && (wt === realTarget || isPathInsideDir(wt, realTarget)));
   }
   if (!authorized) {
@@ -231,7 +244,9 @@ async function resolveAuthorizedRepoRoot({ projectId = '', cascadeId = '' } = {}
   if (!topOut || !topOut.trim()) {
     throw Object.assign(new Error('not_a_git_repo'), { code: 'not_a_git_repo' });
   }
-  const repoRootReal = normalizeRealPath(topOut.trim());
+  const topTrimmed = topOut.trim();
+  const repoRootReal = normalizeRealPath(topTrimmed);
+  const displayRepoRoot = getRealPathPreserveCase(topTrimmed);
   // Ensure rev-parse --show-toplevel did not escape outside the authorized root/worktree
   const topAuthorized =
     repoRootReal === realTarget ||
@@ -254,8 +269,8 @@ async function resolveAuthorizedRepoRoot({ projectId = '', cascadeId = '' } = {}
   return {
     repoRootReal,
     projectId: resolvedProjectId,
-    repoName: repoName || path.basename(repoRootReal),
-    shortPath: formatShortPath(repoRootReal),
+    repoName: repoName || path.basename(displayRepoRoot || repoRootReal),
+    shortPath: formatShortPath(displayRepoRoot || repoRootReal),
     gitExec,
   };
 }
